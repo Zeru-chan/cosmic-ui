@@ -1,12 +1,27 @@
 export type SplitDirection = 'horizontal' | 'vertical';
 export type DropZone = 'top' | 'right' | 'bottom' | 'left' | 'center';
 export type StartupAction = 'welcome' | 'none' | 'new';
+export type PaneTabKind =
+  | 'page'
+  | 'code'
+  | 'text'
+  | 'json'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'binary';
+export type PaneTabSource = 'page' | 'scripts' | 'workspace' | 'external' | 'generated';
 
 export interface PaneTab {
   id: string;
   title: string;
+  kind?: PaneTabKind;
+  source?: PaneTabSource;
   fileId?: string;
+  path?: string;
+  extension?: string | null;
   content?: string;
+  readOnly?: boolean;
   closable?: boolean;
   isDirty?: boolean;
   width?: number;
@@ -64,7 +79,13 @@ function generateId(): string {
 const welcomeTabId = 'welcome';
 
 function createWelcomeTab(): PaneTab {
-  return { id: welcomeTabId, title: 'Workspace', closable: true };
+  return {
+    id: welcomeTabId,
+    title: 'Workspace',
+    kind: 'page',
+    source: 'page',
+    closable: true,
+  };
 }
 
 function createWelcomeTabs(): PaneTab[] {
@@ -544,10 +565,36 @@ export function updateTabInAllPanes(tabId: string, updater: (tab: PaneTab) => Pa
   for (const pane of panes) {
     const hasTab = pane.tabs.some((t) => t.id === tabId);
     if (hasTab) {
-      updatePane(pane.id, (p) => ({
-        ...p,
-        tabs: p.tabs.map((t) => (t.id === tabId ? updater(t) : t)),
-      }));
+      updatePane(pane.id, (p) => {
+        let nextActiveTabId = p.activeTabId;
+        const tabs = p.tabs.map((t) => {
+          if (t.id !== tabId) {
+            return t;
+          }
+
+          const updatedTab = updater(t);
+          if (p.activeTabId === tabId) {
+            nextActiveTabId = updatedTab.id;
+          }
+          return updatedTab;
+        });
+
+        return {
+          ...p,
+          tabs,
+          activeTabId: nextActiveTabId,
+        };
+      });
+    }
+  }
+}
+
+export function removeTabsMatching(predicate: (tab: PaneTab) => boolean): void {
+  const panes = getPanes();
+  for (const pane of panes) {
+    const matchingTabIds = pane.tabs.filter(predicate).map((tab) => tab.id);
+    for (const tabId of matchingTabIds) {
+      removeTabFromPane(pane.id, tabId);
     }
   }
 }
@@ -558,11 +605,18 @@ export function initializeWithStartupAction(action: StartupAction): void {
 
   switch (action) {
     case 'welcome':
-      tabs = [{ id: 'welcome', title: 'Workspace', closable: true }];
+      tabs = [{ id: 'welcome', title: 'Workspace', kind: 'page', source: 'page', closable: true }];
       activeTabId = 'welcome';
       break;
     case 'new':
-      tabs = [{ id: 'new_script', title: 'script.lua', closable: true, content: '-- New Script\n' }];
+      tabs = [{
+        id: 'new_script',
+        title: 'script.lua',
+        kind: 'code',
+        source: 'generated',
+        closable: true,
+        content: '-- New Script\n',
+      }];
       activeTabId = 'new_script';
       break;
     case 'none':
@@ -570,7 +624,7 @@ export function initializeWithStartupAction(action: StartupAction): void {
       activeTabId = '';
       break;
     default:
-      tabs = [{ id: 'welcome', title: 'Workspace', closable: true }];
+      tabs = [{ id: 'welcome', title: 'Workspace', kind: 'page', source: 'page', closable: true }];
       activeTabId = 'welcome';
   }
 
@@ -595,12 +649,12 @@ export function restoreSession(tabs: PaneTab[], activeTabId: string): void {
     root: {
       id: 'root',
       type: 'pane',
-      pane: {
-        id: 'main',
-        tabs: tabs.length > 0 ? tabs : [{ id: 'welcome', title: 'Workspace', closable: true }],
-        activeTabId: activeTabId || (tabs.length > 0 ? tabs[0].id : 'welcome'),
+        pane: {
+          id: 'main',
+          tabs: tabs.length > 0 ? tabs : [{ id: 'welcome', title: 'Workspace', kind: 'page', source: 'page', closable: true }],
+          activeTabId: activeTabId || (tabs.length > 0 ? tabs[0].id : 'welcome'),
+        },
       },
-    },
     dragState: { ...initialDragState },
     activePaneId: 'main',
   };

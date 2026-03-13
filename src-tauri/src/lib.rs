@@ -782,6 +782,10 @@ fn get_workspace_path() -> Result<String, String> {
 
 #[tauri::command]
 fn get_scripts_path() -> Result<String, String> {
+    Ok(get_scripts_dir_path()?.to_string_lossy().to_string())
+}
+
+fn get_scripts_dir_path() -> Result<std::path::PathBuf, String> {
     let local_app_data = std::env::var("LOCALAPPDATA")
         .map_err(|_| "Failed to get LOCALAPPDATA")?;
 
@@ -794,7 +798,66 @@ fn get_scripts_path() -> Result<String, String> {
             .map_err(|e| format!("Failed to create scripts directory: {}", e))?;
     }
 
-    Ok(scripts_dir.to_string_lossy().to_string())
+    Ok(scripts_dir)
+}
+
+fn resolve_scripts_relative_path(relative_path: &str) -> Result<std::path::PathBuf, String> {
+    let relative = std::path::Path::new(relative_path);
+
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err("Invalid scripts path".to_string());
+    }
+
+    Ok(get_scripts_dir_path()?.join(relative))
+}
+
+#[tauri::command]
+fn create_scripts_folder(relative_path: String) -> Result<bool, String> {
+    let folder_path = resolve_scripts_relative_path(&relative_path)?;
+
+    if folder_path.exists() {
+        return Err("Folder already exists".to_string());
+    }
+
+    std::fs::create_dir_all(&folder_path)
+        .map_err(|e| format!("Failed to create folder: {}", e))?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+fn move_scripts_entry(from_relative_path: String, to_relative_path: String) -> Result<bool, String> {
+    let source_path = resolve_scripts_relative_path(&from_relative_path)?;
+    let target_path = resolve_scripts_relative_path(&to_relative_path)?;
+
+    if !source_path.exists() {
+        return Err("Source path does not exist".to_string());
+    }
+
+    if target_path.exists() {
+        return Err("Target path already exists".to_string());
+    }
+
+    if source_path.is_dir() && target_path.starts_with(&source_path) {
+        return Err("Cannot move a folder into itself".to_string());
+    }
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to prepare target directory: {}", e))?;
+    }
+
+    std::fs::rename(&source_path, &target_path)
+        .map_err(|e| format!("Failed to move entry: {}", e))?;
+
+    Ok(true)
 }
 
 #[tauri::command]
@@ -1343,6 +1406,8 @@ pub fn run() {
             open_folder_in_explorer,
             get_workspace_path,
             get_scripts_path,
+            create_scripts_folder,
+            move_scripts_entry,
             get_app_storage_path,
             reveal_in_explorer,
             read_workspace_dir,

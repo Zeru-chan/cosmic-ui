@@ -25,11 +25,22 @@ export interface CodeEditorProps {
   readOnly?: boolean;
   fileId?: string;
   fileName?: string;
+  language?: string;
 }
 
 let isLanguageRegistered = false;
 
-export function CodeEditor({ value, onChange, onCursorChange, onExecute, onSave, readOnly = false, fileId, fileName }: CodeEditorProps) {
+export function CodeEditor({
+  value,
+  onChange,
+  onCursorChange,
+  onExecute,
+  onSave,
+  readOnly = false,
+  fileId,
+  fileName,
+  language = LUAU_LANGUAGE_ID,
+}: CodeEditorProps) {
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
   const [editorSettings, setEditorSettings] = useState<EditorSettings>(getSettings().editor);
@@ -94,7 +105,7 @@ export function CodeEditor({ value, onChange, onCursorChange, onExecute, onSave,
     });
 
     const model = editor.getModel();
-    if (model && fileId && fileName) {
+    if (language === LUAU_LANGUAGE_ID && model && fileId && fileName) {
       runDiagnostics(monaco, model, fileId, fileName);
     }
 
@@ -105,14 +116,20 @@ export function CodeEditor({ value, onChange, onCursorChange, onExecute, onSave,
     if (newValue !== undefined) {
       onChange(newValue);
 
-      if (monacoRef.current && editorRef.current && fileId && fileName) {
+      if (
+        language === LUAU_LANGUAGE_ID &&
+        monacoRef.current &&
+        editorRef.current &&
+        fileId &&
+        fileName
+      ) {
         const model = editorRef.current.getModel();
         if (model) {
           runDiagnostics(monacoRef.current, model, fileId, fileName);
         }
       }
     }
-  }, [onChange, fileId, fileName]);
+  }, [language, onChange, fileId, fileName]);
 
   useEffect(() => {
     loader.init().then((monaco) => {
@@ -154,7 +171,7 @@ export function CodeEditor({ value, onChange, onCursorChange, onExecute, onSave,
   return (
     <Editor
       height="100%"
-      language={LUAU_LANGUAGE_ID}
+      language={language}
       value={value}
       onChange={handleChange}
       onMount={handleEditorMount}

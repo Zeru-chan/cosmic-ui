@@ -1,12 +1,28 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { colors } from '../../config/theme';
 import { useAccentColor } from '../../hooks/useAccentColor';
-import { Code, X, MoreHorizontal, Save, FilePlus, Copy, Plus } from 'lucide-react';
+import {
+  Code,
+  Copy,
+  File,
+  FileAudio,
+  FileImage,
+  FileJson,
+  FilePlus,
+  FileText,
+  FileVideo,
+  MoreHorizontal,
+  Plus,
+  Save,
+  X,
+} from 'lucide-react';
+import type { PaneTabKind } from '../../stores/splitStore';
 
 export interface Tab {
   id: string;
   title: string;
   icon?: React.ReactNode;
+  kind?: PaneTabKind;
   closable?: boolean;
   isDirty?: boolean;
   width?: number;
@@ -34,10 +50,9 @@ interface TabBarProps {
   onCloseToRight?: (tabId: string) => void;
   onCloseAll?: () => void;
   onTabRename?: (tabId: string, newTitle: string) => void;
-  onSaveToFiles?: () => void;
+  onSaveTab?: () => void;
   onNewTab?: () => void;
   onDuplicateTab?: () => void;
-  isFileTab?: boolean;
   onTabWidthChange?: (tabId: string, width: number) => void;
   onNewTempTab?: () => void;
   onSeparateTab?: (tabId: string) => void;
@@ -169,6 +184,37 @@ function TabItem({
     };
   }, [clearHoldTimer]);
 
+  const iconColor =
+    isDragging
+      ? colors.textMuted
+      : isActive && isPaneActive
+      ? accentColor
+      : colors.textMuted;
+
+  const tabIcon = (() => {
+    if (tab.icon) {
+      return tab.icon;
+    }
+
+    switch (tab.kind) {
+      case 'json':
+        return <FileJson size={12} color={iconColor} />;
+      case 'text':
+        return <FileText size={12} color={iconColor} />;
+      case 'image':
+        return <FileImage size={12} color={iconColor} />;
+      case 'audio':
+        return <FileAudio size={12} color={iconColor} />;
+      case 'video':
+        return <FileVideo size={12} color={iconColor} />;
+      case 'binary':
+        return <File size={12} color={iconColor} />;
+      case 'code':
+      default:
+        return <Code size={12} color={iconColor} />;
+    }
+  })();
+
   return (
     <div
       ref={tabRef}
@@ -219,10 +265,7 @@ function TabItem({
         flexShrink: 0,
         transition: 'all 0.2s ease',
       }}>
-        <Code
-          size={12}
-          color={isDragging ? colors.textMuted : isActive && isPaneActive ? accentColor : colors.textMuted}
-        />
+        {tabIcon}
       </div>
       <span
         style={{
@@ -318,10 +361,9 @@ export function TabBar({
   onCloseToRight,
   onCloseAll,
   onTabRename,
-  onSaveToFiles,
+  onSaveTab,
   onNewTab,
   onDuplicateTab,
-  isFileTab = false,
   onTabWidthChange,
   onNewTempTab,
   onSeparateTab,
@@ -800,10 +842,10 @@ export function TabBar({
                   New Script
                 </div>
               )}
-              {isFileTab && onSaveToFiles && (
+              {onSaveTab && (
                 <div
                   onClick={() => {
-                    onSaveToFiles();
+                    onSaveTab();
                     setMoreMenuOpen(false);
                   }}
                   style={{
@@ -821,10 +863,10 @@ export function TabBar({
                   onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                 >
                   <Save size={16} color={colors.textMuted} />
-                  Save to Files
+                  Save
                 </div>
               )}
-              {isFileTab && onDuplicateTab && (
+              {onDuplicateTab && (
                 <div
                   onClick={() => {
                     onDuplicateTab();
@@ -848,7 +890,7 @@ export function TabBar({
                   Duplicate Script
                 </div>
               )}
-              {!onNewTab && !isFileTab && (
+              {!onNewTab && !onSaveTab && !onDuplicateTab && (
                 <div
                   style={{
                     padding: '10px 14px',

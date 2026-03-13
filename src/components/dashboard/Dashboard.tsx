@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useSyncExternalStore, useRef, useMemo } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
-import { readTextFile } from '@tauri-apps/plugin-fs';
+import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { colors } from '../../config/theme';
 import { useKeybinds } from '../../hooks/useKeybinds';
 import { Sidebar } from './Sidebar';
@@ -18,13 +18,18 @@ import { ScriptHub } from './ScriptHub';
 import { FloatingExecuteButton } from './FloatingExecuteButton';
 import { QuickFilePicker } from './QuickFilePicker';
 import { ClientManagerDialog } from './ClientManagerDialog';
-import { CodeEditor } from '../../editor';
-import { fileStore } from '../../stores/fileStore';
+import { FileViewer } from './FileViewer';
+import { fileStore, type VirtualFile } from '../../stores/fileStore';
 import { loadSettings, getSettings, subscribeToSettings, WorkbenchSettings, updateWorkbenchSetting } from '../../stores/settingsStore';
 import { saveSession, loadSession } from '../../stores/sessionStore';
 import { executeScript } from '../../stores/attachStore';
 import { transformScript, loadQolSettings } from '../../stores/qolStore';
 import { loadClientManager } from '../../stores/clientManagerStore';
+import {
+  readWorkspaceFile,
+  renameWorkspacePath,
+  writeWorkspaceFile,
+} from '../../stores/workspaceStore';
 import {
   getStore,
   subscribe,
@@ -43,8 +48,11 @@ import {
   closeTabsToLeft,
   closeTabsToRight,
   closeAllTabsInPane,
+  getPanes,
+  updatePane,
   renameTab,
   removeTabFromAllPanes,
+  removeTabsMatching,
   initializeWithStartupAction,
   restoreSession,
   getSessionState,
@@ -53,9 +61,127 @@ import {
   splitPane,
   DropZone,
   PaneTab,
+  updateTabInAllPanes,
 } from '../../stores/splitStore';
+import { getFileExtension, getPaneTabKind, isTextFileExtension } from '../../utils/fileTypes';
+import { getBaseName, getParentPath, joinPath, normalizeAbsolutePath, pathStartsWith } from '../../utils/filePaths';
 import synapseIcon from '../../assets/icon.png';
 import { Minus, Square, X } from 'lucide-react';
+
+const DEFAULT_WORKBENCH_SETTINGS: WorkbenchSettings = {
+  startupAction: 'welcome',
+  restoreTabs: false,
+  floatingExecuteButton: false,
+  showWorkspaceInSidebar: true,
+  sidebarPosition: 'left',
+  terminalPosition: 'bottom',
+  sidebarWidth: 220,
+  alwaysOnTop: false,
+};
+
+function getPathTabId(source: 'workspace' | 'external', path: string): string {
+  return `${source}:${normalizeAbsolutePath(path).toLowerCase()}`;
+}
+
+function createScriptTab(file: VirtualFile): PaneTab {
+  return {
+    id: `file_${file.id}`,
+    title: file.name,
+    kind: 'code',
+    source: 'scripts',
+    fileId: file.id,
+    path: file.relativePath,
+    extension: file.extension,
+    content: file.content,
+    closable: true,
+  };
+}
+
+function createPathTab(options: {
+  id: string;
+  title: string;
+  source: 'workspace' | 'external' | 'generated';
+  path?: string;
+  extension: string | null;
+  content?: string;
+  readOnly?: boolean;
+}): PaneTab {
+  return {
+    id: options.id,
+    title: options.title,
+    kind: getPaneTabKind(options.extension),
+    source: options.source,
+    path: options.path,
+    extension: options.extension,
+    content: options.content,
+    readOnly: options.readOnly,
+    closable: true,
+    isDirty: false,
+  };
+}
+
+function isRunnableTab(tab: PaneTab | undefined): tab is PaneTab {
+  return Boolean(tab && (tab.kind === 'code' || (tab.kind === undefined && tab.content !== undefined)));
+}
+
+function isTextualTab(tab: PaneTab | undefined): tab is PaneTab {
+  return Boolean(
+    tab &&
+      (
+        tab.kind === 'code' ||
+        tab.kind === 'text' ||
+        tab.kind === 'json' ||
+        (tab.kind === undefined && tab.content !== undefined)
+      ),
+  );
+}
+
+function canSaveTab(tab: PaneTab | undefined): boolean {
+  return Boolean(tab && isTextualTab(tab) && !tab.readOnly && (tab.fileId || tab.path));
+}
+
+function ensureFileExtension(name: string, extension: string | null): string {
+  if (!extension) {
+    return name;
+  }
+
+  const normalizedExtension = extension.toLowerCase();
+  return name.toLowerCase().endsWith(`.${normalizedExtension}`)
+    ? name
+    : `${name}.${normalizedExtension}`;
+}
+
+function updateTabsMatching(
+  predicate: (tab: PaneTab) => boolean,
+  updater: (tab: PaneTab) => PaneTab,
+): void {
+  for (const pane of getPanes()) {
+    if (!pane.tabs.some(predicate)) {
+      continue;
+    }
+
+    updatePane(pane.id, (currentPane) => {
+      let nextActiveTabId = currentPane.activeTabId;
+      const tabs = currentPane.tabs.map((tab) => {
+        if (!predicate(tab)) {
+          return tab;
+        }
+
+        const updatedTab = updater(tab);
+        if (currentPane.activeTabId === tab.id) {
+          nextActiveTabId = updatedTab.id;
+        }
+        return updatedTab;
+      });
+
+      return {
+        ...currentPane,
+        tabs,
+        activeTabId: nextActiveTabId,
+      };
+    });
+  }
+}
 
 interface WindowButtonProps {
   onClick: () => void;
@@ -128,7 +254,7 @@ export function Dashboard() {
   const [activeView, setActiveView] = useState<'editor' | 'settings' | 'account'>('editor');
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(180);
-  const [workbenchSettings, setWorkbenchSettings] = useState<WorkbenchSettings>({ startupAction: 'welcome', restoreTabs: false, floatingExecuteButton: false, sidebarPosition: 'left', terminalPosition: 'bottom', sidebarWidth: 220, alwaysOnTop: false });
+  const [workbenchSettings, setWorkbenchSettings] = useState<WorkbenchSettings>(DEFAULT_WORKBENCH_SETTINGS);
   const [quickFilePickerOpen, setQuickFilePickerOpen] = useState(false);
   const [clientManagerOpen, setClientManagerOpen] = useState(false);
   const initializedRef = useRef(false);
@@ -160,16 +286,8 @@ export function Dashboard() {
 
       if (action === 'new') {
         const file = await fileStore.createFile('script.lua', '-- New Script\n');
-        const tabId = `file_${file.id}`;
-        const newTab: PaneTab = {
-          id: tabId,
-          title: file.name,
-          fileId: file.id,
-          content: file.content,
-          closable: true,
-        };
         initializeWithStartupAction('none');
-        addTabToPane('main', newTab);
+        addTabToPane('main', createScriptTab(file));
       } else {
         initializeWithStartupAction(action);
       }
@@ -209,6 +327,8 @@ export function Dashboard() {
     const newTab: PaneTab = {
       id: tabId,
       title: 'Script Hub',
+      kind: 'page',
+      source: 'page',
       closable: true,
     };
     addTabToPane(store.activePaneId, newTab);
@@ -255,26 +375,57 @@ export function Dashboard() {
     [store.dragState]
   );
 
-  const openFileInPane = useCallback((fileId: string, fileName: string) => {
+  const openFileInPane = useCallback((fileId: string) => {
     const file = fileStore.getFile(fileId);
-    const tabId = `file_${fileId}`;
-    const newTab: PaneTab = {
-      id: tabId,
-      title: fileName,
-      fileId,
-      content: file?.content ?? '',
-      closable: true,
-    };
-    addTabToPane(store.activePaneId, newTab);
+    if (!file) {
+      return;
+    }
+
+    addTabToPane(store.activePaneId, createScriptTab(file));
   }, [store.activePaneId]);
 
-  const openTabInPane = useCallback((tabId: string, title: string) => {
-    const newTab: PaneTab = {
-      id: tabId,
-      title,
-      closable: true,
-    };
-    addTabToPane(store.activePaneId, newTab);
+  const openWorkspaceFileInPane = useCallback(async (
+    path: string,
+    fileName: string,
+    extension: string | null,
+  ) => {
+    const normalizedPath = normalizeAbsolutePath(path);
+    const isTextFile = isTextFileExtension(extension);
+    const content = isTextFile ? await readWorkspaceFile(normalizedPath) : undefined;
+
+    addTabToPane(
+      store.activePaneId,
+      createPathTab({
+        id: getPathTabId('workspace', normalizedPath),
+        title: fileName,
+        source: 'workspace',
+        path: normalizedPath,
+        extension,
+        content,
+        readOnly: !isTextFile,
+      }),
+    );
+  }, [store.activePaneId]);
+
+  const openExternalPathInPane = useCallback(async (filePath: string) => {
+    const normalizedPath = normalizeAbsolutePath(filePath);
+    const fileName = getBaseName(normalizedPath) || 'untitled';
+    const extension = getFileExtension(fileName);
+    const isTextFile = isTextFileExtension(extension);
+    const content = isTextFile ? await readTextFile(normalizedPath) : undefined;
+
+    addTabToPane(
+      store.activePaneId,
+      createPathTab({
+        id: getPathTabId('external', normalizedPath),
+        title: fileName,
+        source: 'external',
+        path: normalizedPath,
+        extension,
+        content,
+        readOnly: !isTextFile,
+      }),
+    );
   }, [store.activePaneId]);
 
   const handleContentChange = useCallback(
@@ -284,10 +435,135 @@ export function Dashboard() {
     []
   );
 
-  const handleFileDelete = useCallback((fileId: string) => {
-    const tabId = `file_${fileId}`;
-    removeTabFromAllPanes(tabId);
+  const handleScriptPathDelete = useCallback((relativePath: string, isDir: boolean) => {
+    if (isDir) {
+      removeTabsMatching((tab) =>
+        tab.source === 'scripts' &&
+        Boolean(tab.path) &&
+        pathStartsWith(tab.path!, relativePath),
+      );
+      return;
+    }
+
+    const file = fileStore.getFileByRelativePath(relativePath);
+    if (file) {
+      removeTabFromAllPanes(`file_${file.id}`);
+    } else {
+      removeTabsMatching((tab) => tab.source === 'scripts' && tab.path === relativePath);
+    }
   }, []);
+
+  const syncScriptTabsFromStore = useCallback((matcher?: (file: VirtualFile) => boolean) => {
+    for (const file of fileStore.getAllFiles()) {
+      if (matcher && !matcher(file)) {
+        continue;
+      }
+
+      updateTabInAllPanes(`file_${file.id}`, (tab) => ({
+        ...tab,
+        title: file.name,
+        path: file.relativePath,
+        extension: file.extension,
+        content: tab.isDirty ? tab.content : file.content,
+      }));
+    }
+  }, []);
+
+  const handleScriptFileRename = useCallback((file: VirtualFile, oldRelativePath: string) => {
+    syncScriptTabsFromStore((candidate) => candidate.id === file.id);
+
+    if (oldRelativePath !== file.relativePath) {
+      removeTabsMatching((tab) =>
+        tab.source === 'scripts' &&
+        tab.id !== `file_${file.id}` &&
+        tab.path === oldRelativePath,
+      );
+    }
+  }, [syncScriptTabsFromStore]);
+
+  const handleScriptDirectoryRename = useCallback((oldPath: string, newPath: string) => {
+    syncScriptTabsFromStore((file) => pathStartsWith(file.relativePath, newPath));
+
+    removeTabsMatching((tab) =>
+      tab.source === 'scripts' &&
+      Boolean(tab.path) &&
+      pathStartsWith(tab.path!, oldPath) &&
+      !fileStore.getAllFiles().some((file) => `file_${file.id}` === tab.id),
+    );
+  }, [syncScriptTabsFromStore]);
+
+  const handleWorkspacePathDelete = useCallback((path: string, isDir: boolean) => {
+    const normalizedPath = normalizeAbsolutePath(path);
+    removeTabsMatching((tab) => {
+      if (tab.source !== 'workspace' || !tab.path) {
+        return false;
+      }
+
+      return isDir ? pathStartsWith(tab.path, normalizedPath) : tab.path === normalizedPath;
+    });
+  }, []);
+
+  const handleWorkspaceFileRename = useCallback((oldPath: string, newPath: string) => {
+    updateTabsMatching(
+      (tab) => tab.source === 'workspace' && tab.path === oldPath,
+      (tab) => ({
+        ...tab,
+        id: getPathTabId('workspace', newPath),
+        title: getBaseName(newPath),
+        path: newPath,
+        extension: getFileExtension(newPath),
+      }),
+    );
+  }, []);
+
+  const handleWorkspaceDirectoryRename = useCallback((oldPath: string, newPath: string) => {
+    updateTabsMatching(
+      (tab) =>
+        tab.source === 'workspace' &&
+        Boolean(tab.path) &&
+        pathStartsWith(tab.path!, oldPath),
+      (tab) => {
+        const nextPath = tab.path!.replace(oldPath, newPath);
+        return {
+          ...tab,
+          id: getPathTabId('workspace', nextPath),
+          title: getBaseName(nextPath),
+          path: nextPath,
+          extension: getFileExtension(nextPath),
+        };
+      },
+    );
+  }, []);
+
+  const handleSidebarMutation = useCallback((mutation: import('./Sidebar').SidebarMutation) => {
+    switch (mutation.type) {
+      case 'script-file-renamed':
+        handleScriptFileRename(mutation.file, mutation.oldPath);
+        break;
+      case 'script-path-removed':
+        handleScriptPathDelete(mutation.path, mutation.isDir);
+        break;
+      case 'script-directory-renamed':
+        handleScriptDirectoryRename(mutation.oldPath, mutation.newPath);
+        break;
+      case 'workspace-file-renamed':
+        handleWorkspaceFileRename(mutation.oldPath, mutation.newPath);
+        break;
+      case 'workspace-path-removed':
+        handleWorkspacePathDelete(mutation.path, mutation.isDir);
+        break;
+      case 'workspace-directory-renamed':
+        handleWorkspaceDirectoryRename(mutation.oldPath, mutation.newPath);
+        break;
+    }
+  }, [
+    handleScriptDirectoryRename,
+    handleScriptFileRename,
+    handleScriptPathDelete,
+    handleWorkspaceDirectoryRename,
+    handleWorkspaceFileRename,
+    handleWorkspacePathDelete,
+  ]);
 
   const handleTabsReorder = useCallback((paneId: string) => (tabs: Tab[]) => {
     const paneTabs: PaneTab[] = tabs.map((t) => {
@@ -321,17 +597,30 @@ export function Dashboard() {
     const tab = pane.tabs.find((t) => t.id === tabId);
     if (!tab) return;
 
-    if (tab.fileId) {
-      const finalName = newTitle.endsWith('.lua') || newTitle.endsWith('.luau') ? newTitle : `${newTitle}.lua`;
-      const existingFile = fileStore.getFileByName(finalName);
-      if (!existingFile || existingFile.id === tab.fileId) {
-        await fileStore.renameFile(tab.fileId, finalName);
-        renameTab(paneId, tabId, finalName);
+    if (tab.source === 'scripts' && tab.fileId) {
+      const finalName = ensureFileExtension(newTitle, tab.extension || 'lua');
+      const currentDirectory = getParentPath(tab.path || '');
+      const relativeTargetPath = joinPath(currentDirectory, finalName);
+      const existingFile = fileStore.getFileByRelativePath(relativeTargetPath);
+      if (existingFile && existingFile.id !== tab.fileId) {
+        return;
       }
-    } else {
-      renameTab(paneId, tabId, newTitle);
+
+      const oldRelativePath = tab.path || '';
+      const renamedFile = await fileStore.renameFile(tab.fileId, finalName);
+      handleScriptFileRename(renamedFile, oldRelativePath);
+      return;
     }
-  }, []);
+
+    if (tab.source === 'workspace' && tab.path) {
+      const finalName = ensureFileExtension(newTitle, tab.extension || getFileExtension(tab.path));
+      const { oldPath, newPath } = await renameWorkspacePath(tab.path, finalName);
+      handleWorkspaceFileRename(oldPath, newPath);
+      return;
+    }
+
+    renameTab(paneId, tabId, newTitle);
+  }, [handleScriptFileRename, handleWorkspaceFileRename]);
 
   const handleTabWidthChange = useCallback((paneId: string) => (tabId: string, width: number) => {
     updateTabWidth(paneId, tabId, width);
@@ -342,32 +631,39 @@ export function Dashboard() {
     let counter = 1;
     let newName = `${baseName}.lua`;
 
-    while (fileStore.getFileByName(newName)) {
+    while (fileStore.getFileByRelativePath(newName)) {
       counter++;
       newName = `${baseName}${counter}.lua`;
     }
 
     const file = await fileStore.createFile(newName, '-- New Script\n');
-    const tabId = `file_${file.id}`;
-    const newTab: PaneTab = {
-      id: tabId,
-      title: file.name,
-      fileId: file.id,
-      content: file.content,
-      closable: true,
-    };
-    addTabToPane(paneId, newTab);
+    addTabToPane(paneId, createScriptTab(file));
   }, []);
 
-  const handleSaveToFiles = useCallback((paneId: string) => async () => {
+  const savePaneTab = useCallback(async (paneId: string, tab?: PaneTab) => {
+    if (!tab || !canSaveTab(tab)) {
+      return;
+    }
+
+    const content = tab.content || '';
+
+    if (tab.fileId) {
+      await fileStore.updateFile(tab.fileId, content);
+    } else if (tab.source === 'workspace' && tab.path) {
+      await writeWorkspaceFile(tab.path, content);
+    } else if (tab.source === 'external' && tab.path) {
+      await writeTextFile(tab.path, content);
+    }
+
+    markTabClean(paneId, tab.id);
+  }, []);
+
+  const handleSaveTab = useCallback((paneId: string) => async () => {
     const pane = getPane(paneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === pane.activeTabId);
-    if (tab?.fileId) {
-      await fileStore.updateFile(tab.fileId, tab.content || '');
-      markTabClean(paneId, tab.id);
-    }
-  }, []);
+    await savePaneTab(paneId, tab);
+  }, [savePaneTab]);
 
   const handleSeparateTab = useCallback((paneId: string) => (tabId: string) => {
     const pane = getPane(paneId);
@@ -387,6 +683,9 @@ export function Dashboard() {
     const newTab: PaneTab = {
       id: tabId,
       title: 'Untitled',
+      kind: 'code',
+      source: 'generated',
+      extension: 'lua',
       content: '',
       closable: true,
     };
@@ -397,37 +696,30 @@ export function Dashboard() {
     const pane = getPane(paneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === pane.activeTabId);
-    if (!tab?.fileId) return;
+    if (!tab?.fileId || tab.source !== 'scripts') return;
 
     const originalFile = fileStore.getFile(tab.fileId);
     if (!originalFile) return;
 
+    const scriptDirectory = getParentPath(originalFile.relativePath);
     const baseName = originalFile.name.replace(/\.(lua|luau)$/, '');
     let counter = 1;
     let newName = `${baseName}_copy.lua`;
 
-    while (fileStore.getFileByName(newName)) {
+    while (fileStore.getFileByRelativePath(joinPath(scriptDirectory, newName))) {
       counter++;
       newName = `${baseName}_copy${counter}.lua`;
     }
 
-    const newFile = await fileStore.createFile(newName, originalFile.content);
-    const newTabId = `file_${newFile.id}`;
-    const newTab: PaneTab = {
-      id: newTabId,
-      title: newFile.name,
-      fileId: newFile.id,
-      content: newFile.content,
-      closable: true,
-    };
-    addTabToPane(paneId, newTab);
+    const newFile = await fileStore.createFile(newName, originalFile.content, scriptDirectory);
+    addTabToPane(paneId, createScriptTab(newFile));
   }, []);
 
   const handleExecuteScript = useCallback((paneId: string) => async () => {
     const pane = getPane(paneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === pane.activeTabId);
-    if (!tab) return;
+    if (!isRunnableTab(tab)) return;
     const content = tab.content || '';
     if (!content.trim()) return;
     await executeScript(transformScript(content));
@@ -437,7 +729,7 @@ export function Dashboard() {
     const pane = getPane(store.activePaneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === pane.activeTabId);
-    if (!tab) return;
+    if (!isRunnableTab(tab)) return;
     const content = tab.content || '';
     if (!content.trim()) return;
     await executeScript(transformScript(content));
@@ -447,31 +739,22 @@ export function Dashboard() {
     const baseName = 'script';
     let counter = 1;
     let newName = `${baseName}.lua`;
-    while (fileStore.getFileByName(newName)) {
+    while (fileStore.getFileByRelativePath(newName)) {
       counter++;
       newName = `${baseName}${counter}.lua`;
     }
     const file = await fileStore.createFile(newName, '-- New Script\n');
-    const tabId = `file_${file.id}`;
-    const newTab: PaneTab = {
-      id: tabId,
-      title: file.name,
-      fileId: file.id,
-      content: file.content,
-      closable: true,
-    };
-    addTabToPane(store.activePaneId, newTab);
+    addTabToPane(store.activePaneId, createScriptTab(file));
   }, [store.activePaneId]);
 
   const handleKeybindSaveScript = useCallback(async () => {
     const pane = getPane(store.activePaneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === pane.activeTabId);
-    if (tab?.fileId && tab.isDirty) {
-      await fileStore.updateFile(tab.fileId, tab.content || '');
-      markTabClean(store.activePaneId, tab.id);
+    if (tab?.isDirty) {
+      await savePaneTab(store.activePaneId, tab);
     }
-  }, [store.activePaneId]);
+  }, [savePaneTab, store.activePaneId]);
 
   const handleKeybindCloseTab = useCallback(() => {
     const pane = getPane(store.activePaneId);
@@ -486,7 +769,7 @@ export function Dashboard() {
     const pane = getPane(store.activePaneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === pane.activeTabId);
-    if (!tab || !tab.fileId) return;
+    if (!isRunnableTab(tab)) return;
     const content = tab.content || '';
     if (!content.trim()) return;
     await executeScript(transformScript(content));
@@ -515,19 +798,8 @@ export function Dashboard() {
     if (!selected) return;
 
     const filePath = typeof selected === 'string' ? selected : selected;
-    const content = await readTextFile(filePath);
-    const fileName = filePath.split(/[/\\]/).pop() || 'untitled.lua';
-    const tabId = `external_${Date.now()}`;
-
-    const newTab: PaneTab = {
-      id: tabId,
-      title: fileName,
-      content,
-      closable: true,
-      isDirty: false,
-    };
-    addTabToPane(store.activePaneId, newTab);
-  }, [store.activePaneId]);
+    await openExternalPathInPane(filePath);
+  }, [openExternalPathInPane]);
 
   const keybindHandlers = useMemo(
     () => ({
@@ -560,9 +832,10 @@ export function Dashboard() {
       if (!pane) return null;
 
       const activeTab = pane.tabs.find((t) => t.id === pane.activeTabId);
-      const isFileTab = activeTab?.fileId !== undefined;
-      const isCodeTab = isFileTab || activeTab?.content !== undefined;
       const isPaneActive = store.activePaneId === paneId;
+      const showRunButton = isRunnableTab(activeTab);
+      const allowSave = canSaveTab(activeTab);
+      const allowDuplicate = activeTab?.source === 'scripts' && Boolean(activeTab.fileId);
 
       return (
         <div
@@ -585,7 +858,7 @@ export function Dashboard() {
             onTabClick={(tabId) => setActiveTab(paneId, tabId)}
             onTabClose={(tabId) => removeTabFromPane(paneId, tabId)}
             onRunClick={handleExecuteScript(paneId)}
-            showRunButton={isCodeTab}
+            showRunButton={showRunButton}
             hideRunButton={workbenchSettings.floatingExecuteButton}
             paneId={paneId}
             onDragStart={handleDragStart}
@@ -597,10 +870,9 @@ export function Dashboard() {
             onCloseToRight={handleCloseToRight(paneId)}
             onCloseAll={handleCloseAll(paneId)}
             onTabRename={handleTabRename(paneId)}
-            onSaveToFiles={handleSaveToFiles(paneId)}
+            onSaveTab={allowSave ? handleSaveTab(paneId) : undefined}
             onNewTab={handleNewTab(paneId)}
-            onDuplicateTab={handleDuplicateTab(paneId)}
-            isFileTab={isCodeTab}
+            onDuplicateTab={allowDuplicate ? handleDuplicateTab(paneId) : undefined}
             onTabWidthChange={handleTabWidthChange(paneId)}
             onNewTempTab={handleNewTempTab(paneId)}
             onSeparateTab={handleSeparateTab(paneId)}
@@ -618,14 +890,16 @@ export function Dashboard() {
             {pane.activeTabId === 'scripthub' && (
               <ScriptHub onExecuteScript={handleScriptHubExecute} />
             )}
-            {isCodeTab && activeTab && (
-              <CodeEditor
-                value={activeTab.content || ''}
-                onChange={handleContentChange(paneId, activeTab.id)}
-                fileId={activeTab.fileId || activeTab.id}
-                fileName={activeTab.title}
-              />
-            )}
+            {activeTab &&
+              activeTab.id !== 'welcome' &&
+              activeTab.id !== 'scripthub' && (
+                <FileViewer
+                  tab={activeTab}
+                  onChange={handleContentChange(paneId, activeTab.id)}
+                  onExecute={handleExecuteScript(paneId)}
+                  onSave={allowSave ? handleSaveTab(paneId) : undefined}
+                />
+              )}
 
             <DropZoneOverlay
               isDragging={store.dragState.isDragging}
@@ -638,11 +912,9 @@ export function Dashboard() {
     [
       store.activePaneId,
       store.dragState,
-      terminalOpen,
       handleDragStart,
       handleContentChange,
       handleDrop,
-      openTabInPane,
       handleTabsReorder,
       handleCloseOthers,
       handleCloseToLeft,
@@ -650,7 +922,7 @@ export function Dashboard() {
       handleCloseAll,
       handleTabRename,
       handleNewTab,
-      handleSaveToFiles,
+      handleSaveTab,
       handleDuplicateTab,
       handleExecuteScript,
       handleScriptHubExecute,
@@ -736,14 +1008,17 @@ export function Dashboard() {
         {activeView === 'editor' ? (
           <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
             <Sidebar
-              activeTab={activeTab?.title || 'Welcome'}
+              activeTabPath={activeTab?.path}
+              activeTabSource={activeTab?.source}
               onFileOpen={openFileInPane}
-              onFileDelete={handleFileDelete}
+              onWorkspaceFileOpen={openWorkspaceFileInPane}
+              onSidebarMutation={handleSidebarMutation}
               onSettingsClick={() => setActiveView('settings')}
               onAccountClick={() => setActiveView('account')}
               onScriptHubClick={handleScriptHubOpen}
               onClientManagerClick={() => setClientManagerOpen(true)}
               onRevealInExplorer={handleRevealInExplorer}
+              showWorkspace={workbenchSettings.showWorkspaceInSidebar}
               width={workbenchSettings.sidebarWidth}
               onWidthChange={(w) => updateWorkbenchSetting('sidebarWidth', w)}
               position={workbenchSettings.sidebarPosition}

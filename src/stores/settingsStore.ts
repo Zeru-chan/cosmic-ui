@@ -23,6 +23,7 @@ export interface WorkbenchSettings {
   startupAction: 'welcome' | 'none' | 'new';
   restoreTabs: boolean;
   floatingExecuteButton: boolean;
+  showWorkspaceInSidebar: boolean;
   sidebarPosition: 'left' | 'right';
   terminalPosition: 'bottom' | 'top';
   sidebarWidth: number;
@@ -67,6 +68,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     startupAction: 'welcome',
     restoreTabs: false,
     floatingExecuteButton: false,
+    showWorkspaceInSidebar: true,
     sidebarPosition: 'left',
     terminalPosition: 'bottom',
     sidebarWidth: 220,

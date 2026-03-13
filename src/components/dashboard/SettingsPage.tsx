@@ -591,6 +591,14 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
               />
             </SettingRow>
 
+            <SettingRow label="Show Workspace in Sidebar" description="Display the workspace tree above scripts in the main sidebar">
+              <ToggleSwitch
+                checked={settings.workbench.showWorkspaceInSidebar}
+                onChange={(v) => updateWorkbenchSetting('showWorkspaceInSidebar', v)}
+                accentColor={accent.primary}
+              />
+            </SettingRow>
+
             <SettingRow label="Always on Top" description="Keep the window above all other windows">
               <ToggleSwitch
                 checked={settings.workbench.alwaysOnTop}
