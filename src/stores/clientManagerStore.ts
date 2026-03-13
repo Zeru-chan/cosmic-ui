@@ -1,5 +1,5 @@
-import { readTextFile, writeTextFile, exists, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
+import { loadPersistedJson, savePersistedJson } from './persistedJson';
 
 export interface RobloxAccount {
   id: string;
@@ -37,21 +37,9 @@ function genId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substring(2);
 }
 
-async function ensureDir(): Promise<void> {
-  try {
-    const dirExists = await exists('', { baseDir: BaseDirectory.AppData });
-    if (!dirExists) {
-      await mkdir('', { baseDir: BaseDirectory.AppData, recursive: true });
-    }
-  } catch {}
-}
-
 async function persist(): Promise<void> {
   try {
-    await ensureDir();
-    await writeTextFile(FILE_NAME, JSON.stringify(data, null, 2), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(FILE_NAME, data);
   } catch (e) {
     console.error('Failed to save client manager data:', e);
   }
@@ -60,14 +48,11 @@ async function persist(): Promise<void> {
 export async function loadClientManager(): Promise<void> {
   if (initialized) return;
   try {
-    await ensureDir();
-    const fileExists = await exists(FILE_NAME, { baseDir: BaseDirectory.AppData });
-    if (fileExists) {
-      const content = await readTextFile(FILE_NAME, { baseDir: BaseDirectory.AppData });
-      const loaded = JSON.parse(content);
+    const loaded = await loadPersistedJson<Partial<ClientManagerData> | null>(FILE_NAME, null);
+    if (loaded) {
       data = {
-        accounts: loaded.accounts || [],
-        games: loaded.games || [],
+        accounts: Array.isArray(loaded.accounts) ? loaded.accounts : [],
+        games: Array.isArray(loaded.games) ? loaded.games : [],
       };
     }
   } catch (e) {
@@ -112,10 +97,10 @@ export async function addAccount(rawCookie: string): Promise<RobloxAccount> {
   return account;
 }
 
-export function removeAccount(id: string): void {
+export async function removeAccount(id: string): Promise<void> {
   data = { ...data, accounts: data.accounts.filter((a) => a.id !== id) };
   notify();
-  persist();
+  await persist();
 }
 
 export async function addGame(placeId: number): Promise<RobloxGame> {
@@ -141,10 +126,10 @@ export async function addGame(placeId: number): Promise<RobloxGame> {
   return game;
 }
 
-export function removeGame(id: string): void {
+export async function removeGame(id: string): Promise<void> {
   data = { ...data, games: data.games.filter((g) => g.id !== id) };
   notify();
-  persist();
+  await persist();
 }
 
 export function getClientManager(): ClientManagerData {

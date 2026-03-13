@@ -1,4 +1,4 @@
-import { readTextFile, writeTextFile, exists, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { loadPersistedJson, savePersistedJson } from './persistedJson';
 
 export type KeybindAction =
   | 'newScript'
@@ -55,10 +55,8 @@ function notifyListeners(): void {
 
 export async function loadKeybinds(): Promise<KeybindsSettings> {
   try {
-    const fileExists = await exists(KEYBINDS_FILE, { baseDir: BaseDirectory.AppData });
-    if (fileExists) {
-      const content = await readTextFile(KEYBINDS_FILE, { baseDir: BaseDirectory.AppData });
-      const loaded = JSON.parse(content);
+    const loaded = await loadPersistedJson<Partial<KeybindsSettings> | null>(KEYBINDS_FILE, null);
+    if (loaded) {
       keybinds = { ...DEFAULT_KEYBINDS, ...loaded };
     }
   } catch {
@@ -72,9 +70,7 @@ export async function saveKeybinds(newKeybinds: Partial<KeybindsSettings>): Prom
   keybinds = { ...keybinds, ...newKeybinds };
   notifyListeners();
   try {
-    await writeTextFile(KEYBINDS_FILE, JSON.stringify(keybinds, null, 2), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(KEYBINDS_FILE, keybinds);
   } catch {}
 }
 
@@ -82,9 +78,7 @@ export async function resetKeybinds(): Promise<void> {
   keybinds = { ...DEFAULT_KEYBINDS };
   notifyListeners();
   try {
-    await writeTextFile(KEYBINDS_FILE, JSON.stringify(keybinds, null, 2), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(KEYBINDS_FILE, keybinds);
   } catch {}
 }
 

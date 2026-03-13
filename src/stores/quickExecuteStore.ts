@@ -1,10 +1,10 @@
-import { readTextFile, writeTextFile, exists, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { listen } from '@tauri-apps/api/event';
 import { fileStore } from './fileStore';
 import { transformScript } from './qolStore';
 import { executeScript as executeScriptFromAttach } from './attachStore';
+import { loadPersistedJson, savePersistedJson } from './persistedJson';
 
 export interface ScriptKeybind {
   scriptId: string;
@@ -50,12 +50,19 @@ let registeredScriptShortcuts: Map<string, string> = new Map();
 let lastToggleTime = 0;
 const TOGGLE_DEBOUNCE_MS = 300;
 
+function cloneQuickExecuteSettings(settings: QuickExecuteSettings): QuickExecuteSettings {
+  return {
+    ...settings,
+    scriptKeybinds: { ...settings.scriptKeybinds },
+  };
+}
+
 function updateSnapshot(): void {
   stateSnapshot = {
     isVisible: state.isVisible,
     selectedScriptId: state.selectedScriptId,
     editorContent: state.editorContent,
-    settings: { ...state.settings },
+    settings: cloneQuickExecuteSettings(state.settings),
   };
 }
 
@@ -251,14 +258,18 @@ export async function toggleQuickExecuteWindow(): Promise<void> {
 
 export async function loadQuickExecuteSettings(): Promise<QuickExecuteSettings> {
   try {
-    const fileExists = await exists(QUICK_EXECUTE_FILE, { baseDir: BaseDirectory.AppData });
-    if (fileExists) {
-      const content = await readTextFile(QUICK_EXECUTE_FILE, { baseDir: BaseDirectory.AppData });
-      const loaded = JSON.parse(content);
-      state.settings = { ...DEFAULT_SETTINGS, ...loaded };
+    const loaded = await loadPersistedJson<Partial<QuickExecuteSettings> | null>(QUICK_EXECUTE_FILE, null);
+    if (loaded) {
+      state.settings = {
+        ...DEFAULT_SETTINGS,
+        ...loaded,
+        scriptKeybinds: loaded.scriptKeybinds && typeof loaded.scriptKeybinds === 'object'
+          ? { ...loaded.scriptKeybinds }
+          : {},
+      };
     }
   } catch {
-    state.settings = { ...DEFAULT_SETTINGS };
+    state.settings = cloneQuickExecuteSettings(DEFAULT_SETTINGS);
   }
 
   if (state.settings.enabled) {
@@ -267,7 +278,7 @@ export async function loadQuickExecuteSettings(): Promise<QuickExecuteSettings> 
   }
 
   notifyListeners();
-  return state.settings;
+  return cloneQuickExecuteSettings(state.settings);
 }
 
 export async function saveQuickExecuteSettings(newSettings: Partial<QuickExecuteSettings>): Promise<void> {
@@ -284,9 +295,7 @@ export async function saveQuickExecuteSettings(newSettings: Partial<QuickExecute
   }
 
   try {
-    await writeTextFile(QUICK_EXECUTE_FILE, JSON.stringify(state.settings, null, 2), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(QUICK_EXECUTE_FILE, cloneQuickExecuteSettings(state.settings));
   } catch {
   }
 }
@@ -296,7 +305,7 @@ export function getQuickExecuteState(): QuickExecuteState {
 }
 
 export function getQuickExecuteSettings(): QuickExecuteSettings {
-  return { ...state.settings };
+  return cloneQuickExecuteSettings(state.settings);
 }
 
 export function setQuickExecuteVisible(visible: boolean): void {

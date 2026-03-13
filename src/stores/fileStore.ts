@@ -36,34 +36,9 @@ export interface FileStore {
 }
 
 let scriptsDir: string | null = null;
-
-async function getScriptsDir(): Promise<string> {
-  if (!scriptsDir) {
-    scriptsDir = await invoke<string>("get_scripts_path");
-  }
-  return scriptsDir;
-}
-
-let files: Map<string, VirtualFile> = new Map();
-let listeners: Set<() => void> = new Set();
-let initialized = false;
-
-function notifyListeners(): void {
-  listeners.forEach((listener) => listener());
-}
-
-function generateId(name: string): string {
-  return `file_${name.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
-}
-
-async function ensureScriptsDir(): Promise<string> {
-  return await getScriptsDir();
-}
-
-async function createDefaultFiles(): Promise<void> {
-  const dir = await getScriptsDir();
-
-  const exampleContent = `-- Example Luau Script
+const DEFAULT_FILE_STATE_STORAGE_KEY = 'synz:default-file-state';
+const DEFAULT_FILE_TEMPLATES: Record<string, string> = {
+  'example.lua': `-- Example Luau Script
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -84,9 +59,8 @@ for _, player in Players:GetPlayers() do
 end
 
 print("Example script loaded!")
-`;
-
-  const testContent = `-- Test Script
+`,
+  'test.lua': `-- Test Script
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 
@@ -116,21 +90,105 @@ local connection = RunService.Heartbeat:Connect(function(deltaTime)
 end)
 
 print("Test script initialized!")
-`;
+`,
+};
 
-  const examplePath = `${dir}\\example.lua`;
-  const testPath = `${dir}\\test.lua`;
+interface DefaultFileState {
+  seeded: boolean;
+  deleted: string[];
+}
 
-  const exampleExists = await exists(examplePath);
-  const testExists = await exists(testPath);
+function getDefaultFileState(): DefaultFileState {
+  try {
+    const raw = localStorage.getItem(DEFAULT_FILE_STATE_STORAGE_KEY);
+    if (!raw) {
+      return { seeded: false, deleted: [] };
+    }
 
-  if (!exampleExists) {
-    await writeTextFile(examplePath, exampleContent);
+    const parsed = JSON.parse(raw) as Partial<DefaultFileState>;
+    return {
+      seeded: parsed.seeded === true,
+      deleted: Array.isArray(parsed.deleted)
+        ? parsed.deleted.filter((name): name is string => typeof name === 'string')
+        : [],
+    };
+  } catch {
+    return { seeded: false, deleted: [] };
+  }
+}
+
+function saveDefaultFileState(state: DefaultFileState): void {
+  try {
+    localStorage.setItem(DEFAULT_FILE_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+  }
+}
+
+function isManagedDefaultFile(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(DEFAULT_FILE_TEMPLATES, name);
+}
+
+function markDefaultFileDeleted(name: string): void {
+  if (!isManagedDefaultFile(name)) {
+    return;
   }
 
-  if (!testExists) {
-    await writeTextFile(testPath, testContent);
+  const state = getDefaultFileState();
+  if (state.deleted.includes(name)) {
+    return;
   }
+
+  saveDefaultFileState({
+    ...state,
+    deleted: [...state.deleted, name],
+  });
+}
+
+async function getScriptsDir(): Promise<string> {
+  if (!scriptsDir) {
+    scriptsDir = await invoke<string>("get_scripts_path");
+  }
+  return scriptsDir;
+}
+
+let files: Map<string, VirtualFile> = new Map();
+let listeners: Set<() => void> = new Set();
+let initialized = false;
+
+function notifyListeners(): void {
+  listeners.forEach((listener) => listener());
+}
+
+function generateId(name: string): string {
+  return `file_${name.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
+}
+
+async function ensureScriptsDir(): Promise<string> {
+  return await getScriptsDir();
+}
+
+async function createDefaultFiles(): Promise<void> {
+  const defaultFileState = getDefaultFileState();
+  if (defaultFileState.seeded) {
+    return;
+  }
+
+  const dir = await getScriptsDir();
+  for (const [fileName, content] of Object.entries(DEFAULT_FILE_TEMPLATES)) {
+    if (defaultFileState.deleted.includes(fileName)) {
+      continue;
+    }
+
+    const filePath = `${dir}\\${fileName}`;
+    if (!(await exists(filePath))) {
+      await writeTextFile(filePath, content);
+    }
+  }
+
+  saveDefaultFileState({
+    ...defaultFileState,
+    seeded: true,
+  });
 }
 
 async function loadFilesFromDisk(): Promise<void> {
@@ -249,6 +307,7 @@ export const fileStore: FileStore = {
     const file = files.get(id);
     if (file && file.filePath) {
       await remove(file.filePath);
+      markDefaultFileDeleted(file.name);
 
       files.delete(id);
       notifyListeners();
@@ -258,6 +317,7 @@ export const fileStore: FileStore = {
   async renameFile(id: string, newName: string): Promise<void> {
     const file = files.get(id);
     if (file && file.filePath) {
+      const oldName = file.name;
       const dir = await getScriptsDir();
       const newPath = `${dir}\\${newName}`;
 
@@ -267,6 +327,9 @@ export const fileStore: FileStore = {
       file.filePath = newPath;
       file.modifiedAt = Date.now();
       files.set(id, file);
+      if (oldName !== newName) {
+        markDefaultFileDeleted(oldName);
+      }
       notifyListeners();
     }
   },

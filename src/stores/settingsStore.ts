@@ -1,4 +1,4 @@
-import { readTextFile, writeTextFile, exists, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { loadPersistedJson, savePersistedJson } from './persistedJson';
 
 export interface EditorSettings {
   fontSize: number;
@@ -84,28 +84,22 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 const SETTINGS_FILE = 'settings.json';
 
-let settings: AppSettings = {
-  editor: { ...DEFAULT_SETTINGS.editor },
-  autoAttach: { ...DEFAULT_SETTINGS.autoAttach },
-  appearance: { ...DEFAULT_SETTINGS.appearance },
-  workbench: { ...DEFAULT_SETTINGS.workbench },
-  client: { ...DEFAULT_SETTINGS.client },
-};
+function cloneDefaultSettings(): AppSettings {
+  return {
+    editor: { ...DEFAULT_SETTINGS.editor },
+    autoAttach: { ...DEFAULT_SETTINGS.autoAttach },
+    appearance: { ...DEFAULT_SETTINGS.appearance },
+    workbench: { ...DEFAULT_SETTINGS.workbench },
+    client: { ...DEFAULT_SETTINGS.client },
+  };
+}
+
+let settings: AppSettings = cloneDefaultSettings();
 let listeners: Set<() => void> = new Set();
 let initialized = false;
 
 function notifyListeners(): void {
   listeners.forEach((listener) => listener());
-}
-
-async function ensureConfigDir(): Promise<void> {
-  try {
-    const dirExists = await exists('', { baseDir: BaseDirectory.AppData });
-    if (!dirExists) {
-      await mkdir('', { baseDir: BaseDirectory.AppData, recursive: true });
-    }
-  } catch {
-  }
 }
 
 export async function loadSettings(): Promise<AppSettings> {
@@ -114,12 +108,8 @@ export async function loadSettings(): Promise<AppSettings> {
   }
 
   try {
-    await ensureConfigDir();
-
-    const fileExists = await exists(SETTINGS_FILE, { baseDir: BaseDirectory.AppData });
-    if (fileExists) {
-      const content = await readTextFile(SETTINGS_FILE, { baseDir: BaseDirectory.AppData });
-      const loaded = JSON.parse(content);
+    const loaded = await loadPersistedJson<Partial<AppSettings> | null>(SETTINGS_FILE, null);
+    if (loaded) {
       settings = {
         editor: { ...DEFAULT_SETTINGS.editor, ...loaded.editor },
         autoAttach: { ...DEFAULT_SETTINGS.autoAttach, ...loaded.autoAttach },
@@ -128,26 +118,12 @@ export async function loadSettings(): Promise<AppSettings> {
         client: { ...DEFAULT_SETTINGS.client, ...loaded.client },
       };
     } else {
-      settings = {
-        editor: { ...DEFAULT_SETTINGS.editor },
-        autoAttach: { ...DEFAULT_SETTINGS.autoAttach },
-        appearance: { ...DEFAULT_SETTINGS.appearance },
-        workbench: { ...DEFAULT_SETTINGS.workbench },
-        client: { ...DEFAULT_SETTINGS.client },
-      };
-      await writeTextFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), {
-        baseDir: BaseDirectory.AppData,
-      });
+      settings = cloneDefaultSettings();
+      await savePersistedJson(SETTINGS_FILE, settings);
     }
   } catch (e) {
     console.error('Failed to load settings:', e);
-    settings = {
-      editor: { ...DEFAULT_SETTINGS.editor },
-      autoAttach: { ...DEFAULT_SETTINGS.autoAttach },
-      appearance: { ...DEFAULT_SETTINGS.appearance },
-      workbench: { ...DEFAULT_SETTINGS.workbench },
-      client: { ...DEFAULT_SETTINGS.client },
-    };
+    settings = cloneDefaultSettings();
   }
 
   initialized = true;
@@ -171,10 +147,7 @@ export async function saveSettings(newSettings: Partial<AppSettings>): Promise<v
   notifyListeners();
 
   try {
-    await ensureConfigDir();
-    await writeTextFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(SETTINGS_FILE, settings);
   } catch (e) {
     console.error('Failed to save settings:', e);
   }

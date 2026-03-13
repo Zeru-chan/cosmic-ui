@@ -797,6 +797,23 @@ fn get_scripts_path() -> Result<String, String> {
     Ok(scripts_dir.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn get_app_storage_path() -> Result<String, String> {
+    let local_app_data = std::env::var("LOCALAPPDATA")
+        .map_err(|_| "Failed to get LOCALAPPDATA")?;
+
+    let storage_dir = std::path::Path::new(&local_app_data)
+        .join("Synapse Z")
+        .join("state");
+
+    if !storage_dir.exists() {
+        std::fs::create_dir_all(&storage_dir)
+            .map_err(|e| format!("Failed to create app storage directory: {}", e))?;
+    }
+
+    Ok(storage_dir.to_string_lossy().to_string())
+}
+
 #[derive(serde::Serialize, Clone)]
 struct WorkspaceEntry {
     name: String,
@@ -1326,6 +1343,7 @@ pub fn run() {
             open_folder_in_explorer,
             get_workspace_path,
             get_scripts_path,
+            get_app_storage_path,
             reveal_in_explorer,
             read_workspace_dir,
             read_workspace_file,

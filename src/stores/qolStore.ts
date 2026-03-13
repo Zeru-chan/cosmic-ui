@@ -1,4 +1,4 @@
-import { readTextFile, writeTextFile, exists, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { loadPersistedJson, savePersistedJson } from './persistedJson';
 
 export interface QolTransformation {
   id: string;
@@ -28,25 +28,13 @@ function notifyListeners(): void {
   listeners.forEach((listener) => listener());
 }
 
-async function ensureConfigDir(): Promise<void> {
-  try {
-    const dirExists = await exists('', { baseDir: BaseDirectory.AppData });
-    if (!dirExists) {
-      await mkdir('', { baseDir: BaseDirectory.AppData, recursive: true });
-    }
-  } catch {}
-}
-
 export async function loadQolSettings(): Promise<QolSettings> {
   try {
-    await ensureConfigDir();
-    const fileExists = await exists(QOL_FILE, { baseDir: BaseDirectory.AppData });
-    if (fileExists) {
-      const content = await readTextFile(QOL_FILE, { baseDir: BaseDirectory.AppData });
-      const loaded = JSON.parse(content);
+    const loaded = await loadPersistedJson<Partial<QolSettings> | null>(QOL_FILE, null);
+    if (loaded) {
       settings = {
         enabled: loaded.enabled ?? true,
-        userTransformations: loaded.userTransformations ?? [],
+        userTransformations: Array.isArray(loaded.userTransformations) ? loaded.userTransformations : [],
       };
     }
   } catch {
@@ -60,10 +48,7 @@ export async function saveQolSettings(newSettings: Partial<QolSettings>): Promis
   settings = { ...settings, ...newSettings };
   notifyListeners();
   try {
-    await ensureConfigDir();
-    await writeTextFile(QOL_FILE, JSON.stringify(settings, null, 2), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(QOL_FILE, settings);
   } catch {}
 }
 

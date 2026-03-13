@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { readTextFile, writeTextFile, exists, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { loadPersistedJson, savePersistedJson } from './persistedJson';
 
 interface AuthState {
   isRemembered: boolean;
@@ -36,19 +36,15 @@ export async function saveAuthState(
   cachedSession = state;
 
   try {
-    await writeTextFile(AUTH_FILE, JSON.stringify(state), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(AUTH_FILE, state);
   } catch {}
 }
 
 export async function loadAuthState(): Promise<AuthState | null> {
   try {
-    const fileExists = await exists(AUTH_FILE, { baseDir: BaseDirectory.AppData });
-    if (!fileExists) return null;
+    const parsed = await loadPersistedJson<(AuthState & { email?: string }) | null>(AUTH_FILE, null);
+    if (!parsed) return null;
 
-    const content = await readTextFile(AUTH_FILE, { baseDir: BaseDirectory.AppData });
-    const parsed = JSON.parse(content) as AuthState & { email?: string };
     const state: AuthState = {
       isRemembered: parsed.isRemembered,
       licenseKey: parsed.licenseKey ?? parsed.email,
@@ -106,8 +102,6 @@ export function getSession(): AuthState | null {
 export async function clearAuthState(): Promise<void> {
   cachedSession = null;
   try {
-    await writeTextFile(AUTH_FILE, JSON.stringify({ isRemembered: false }), {
-      baseDir: BaseDirectory.AppData,
-    });
+    await savePersistedJson(AUTH_FILE, { isRemembered: false });
   } catch {}
 }

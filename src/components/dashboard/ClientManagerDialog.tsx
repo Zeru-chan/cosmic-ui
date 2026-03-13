@@ -213,7 +213,9 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
                     <AccountCard
                       key={account.id}
                       account={account}
-                      onRemove={() => removeAccount(account.id)}
+                      onRemove={() => {
+                        void removeAccount(account.id);
+                      }}
                     />
                   ))
                 )}
@@ -257,7 +259,9 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
                     <GameCard
                       key={game.id}
                       game={game}
-                      onRemove={() => removeGame(game.id)}
+                      onRemove={() => {
+                        void removeGame(game.id);
+                      }}
                       onLaunch={() => handlePlayClick(game)}
                     />
                   ))
