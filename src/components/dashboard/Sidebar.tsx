@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { colors } from "../../config/theme";
 import { useAccentColor } from "../../hooks/useAccentColor";
+import { DragGhost } from "./DragGhost";
 import {
   fileStore,
   initializeFileStore,
@@ -87,6 +88,9 @@ interface SidebarItemRef {
   isAutoexec?: boolean;
 }
 
+const SIDEBAR_DROP_PATH_ATTR = "data-sidebar-script-drop-path";
+const SIDEBAR_ROOT_DROP_ATTR = "data-sidebar-script-root-drop";
+
 interface ContextMenuState {
   visible: boolean;
   x: number;
@@ -110,15 +114,32 @@ interface ScriptTreeItemProps {
   onRenameValueChange: (value: string) => void;
   onRenameSubmit: (item: SidebarItemRef) => void;
   onRenameCancel: () => void;
+  consumeInteractionSuppression: () => boolean;
+  onPointerDragStartNode: (
+    item: SidebarItemRef,
+    e: React.MouseEvent<HTMLDivElement>,
+  ) => void;
   draggedPath: string | null;
   dropTargetPath: string | null;
-  canDropOnDirectory: (targetPath: string) => boolean;
-  onDragOverDirectory: (targetPath: string | null) => void;
-  onDragStartNode: (item: SidebarItemRef) => void;
-  onDragEndNode: () => void;
-  onDropOnDirectory: (targetPath: string) => void;
   accentColor: string;
   forceExpanded?: boolean;
+}
+
+function getDropPathFromTarget(target: EventTarget | null): string | null {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+
+  const dropElement = target.closest<HTMLElement>(`[${SIDEBAR_DROP_PATH_ATTR}]`);
+  return dropElement?.getAttribute(SIDEBAR_DROP_PATH_ATTR) || null;
+}
+
+function isRootDropTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return Boolean(target.closest(`[${SIDEBAR_ROOT_DROP_ATTR}="true"]`));
 }
 
 function findScriptNodeByPath(
@@ -254,13 +275,10 @@ function ScriptTreeItem({
   onRenameValueChange,
   onRenameSubmit,
   onRenameCancel,
+  consumeInteractionSuppression,
+  onPointerDragStartNode,
   draggedPath,
   dropTargetPath,
-  canDropOnDirectory,
-  onDragOverDirectory,
-  onDragStartNode,
-  onDragEndNode,
-  onDropOnDirectory,
   accentColor,
   forceExpanded = false,
 }: ScriptTreeItemProps) {
@@ -286,13 +304,22 @@ function ScriptTreeItem({
   return (
     <>
       <div
+        data-sidebar-script-drop-path={node.isDir ? node.relativePath : undefined}
         onClick={() => {
+          if (consumeInteractionSuppression()) {
+            return;
+          }
+
           onSelect(node.relativePath);
           if (node.isDir) {
             onToggle(node.relativePath);
           }
         }}
         onDoubleClick={() => {
+          if (consumeInteractionSuppression()) {
+            return;
+          }
+
           if (!node.isDir) {
             onOpen(node);
           }
@@ -301,40 +328,12 @@ function ScriptTreeItem({
           onSelect(node.relativePath);
           onContextMenu(e, itemRef);
         }}
-        draggable={!isEditing}
-        onDragStart={(e) => {
-          e.stopPropagation();
-          onDragStartNode(itemRef);
-          e.dataTransfer.effectAllowed = "move";
-          e.dataTransfer.setData("text/plain", node.relativePath);
-        }}
-        onDragEnd={() => {
-          onDragEndNode();
-        }}
-        onDragOver={(e) => {
-          if (!node.isDir || !canDropOnDirectory(node.relativePath)) {
+        onMouseDown={(e) => {
+          if (isEditing) {
             return;
           }
 
-          e.preventDefault();
-          e.stopPropagation();
-          e.dataTransfer.dropEffect = "move";
-          onDragOverDirectory(node.relativePath);
-        }}
-        onDragLeave={() => {
-          if (node.isDir && dropTargetPath === node.relativePath) {
-            onDragOverDirectory(null);
-          }
-        }}
-        onDrop={(e) => {
-          if (!node.isDir || !canDropOnDirectory(node.relativePath)) {
-            return;
-          }
-
-          e.preventDefault();
-          e.stopPropagation();
-          onDragOverDirectory(null);
-          onDropOnDirectory(node.relativePath);
+          onPointerDragStartNode(itemRef, e);
         }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
@@ -352,7 +351,7 @@ function ScriptTreeItem({
             : isSelected
             ? "rgba(255,255,255,0.05)"
             : isDropTarget
-            ? `${accentColor}18`
+            ? `${accentColor}26`
             : hovered
             ? "rgba(255,255,255,0.03)"
             : "transparent",
@@ -361,6 +360,7 @@ function ScriptTreeItem({
             : isDropTarget
             ? `1px dashed ${accentColor}70`
             : "1px solid transparent",
+          boxShadow: isDropTarget ? `inset 0 0 0 1px ${accentColor}20` : "none",
           transition: "all 0.15s ease",
           opacity: isDragged ? 0.45 : 1,
         }}
@@ -424,6 +424,20 @@ function ScriptTreeItem({
             >
               {node.name}
             </span>
+            {isDropTarget && node.isDir && (
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 700,
+                  color: accentColor,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  flexShrink: 0,
+                }}
+              >
+                Drop
+              </span>
+            )}
             {node.isAutoexec && (
               <div
                 style={{
@@ -462,13 +476,10 @@ function ScriptTreeItem({
             onRenameValueChange={onRenameValueChange}
             onRenameSubmit={onRenameSubmit}
             onRenameCancel={onRenameCancel}
+            consumeInteractionSuppression={consumeInteractionSuppression}
+            onPointerDragStartNode={onPointerDragStartNode}
             draggedPath={draggedPath}
             dropTargetPath={dropTargetPath}
-            canDropOnDirectory={canDropOnDirectory}
-            onDragOverDirectory={onDragOverDirectory}
-            onDragStartNode={onDragStartNode}
-            onDragEndNode={onDragEndNode}
-            onDropOnDirectory={onDropOnDirectory}
             accentColor={accentColor}
             forceExpanded={forceExpanded}
           />
@@ -718,11 +729,28 @@ export function Sidebar({
   });
   const [isResizing, setIsResizing] = useState(false);
   const [draggedItem, setDraggedItem] = useState<SidebarItemRef | null>(null);
+  const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(
+    null,
+  );
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const [rootDropActive, setRootDropActive] = useState(false);
   const startX = useRef(0);
   const startWidth = useRef(0);
   const draggedItemRef = useRef<SidebarItemRef | null>(null);
+  const pointerDragSessionRef = useRef<{
+    item: SidebarItemRef;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  const suppressInteractionRef = useRef(false);
+  const resolveDraggedScriptItem = useCallback(
+    (dragPayload?: SidebarItemRef | null): SidebarItemRef | null => {
+      const candidate = dragPayload ?? draggedItemRef.current;
+      return candidate?.source === "scripts" ? candidate : null;
+    },
+    [],
+  );
 
   const loadScripts = useCallback(() => {
     setScriptTree(fileStore.getScriptTree());
@@ -919,10 +947,13 @@ export function Sidebar({
     loadScripts();
   };
 
-  const canDropInDirectory = useCallback((targetPath: string) => {
-    const currentDraggedItem = draggedItemRef.current;
+  const canDropInDirectory = useCallback((
+    targetPath: string,
+    dragPayload?: SidebarItemRef | null,
+  ) => {
+    const currentDraggedItem = resolveDraggedScriptItem(dragPayload);
 
-    if (!currentDraggedItem || currentDraggedItem.source !== "scripts") {
+    if (!currentDraggedItem) {
       return false;
     }
 
@@ -943,30 +974,81 @@ export function Sidebar({
     }
 
     return true;
-  }, []);
+  }, [resolveDraggedScriptItem]);
 
-  const handleDragStartNode = useCallback((item: SidebarItemRef) => {
-    if (item.source !== "scripts") {
-      return;
+  const consumeInteractionSuppression = useCallback(() => {
+    if (!suppressInteractionRef.current) {
+      return false;
     }
 
-    draggedItemRef.current = item;
-    setDraggedItem(item);
-    setDropTargetPath(null);
-    setRootDropActive(false);
+    suppressInteractionRef.current = false;
+    return true;
   }, []);
+
+  const handlePointerDragStartNode = useCallback(
+    (item: SidebarItemRef, e: React.MouseEvent<HTMLDivElement>) => {
+      if (item.source !== "scripts" || e.button !== 0) {
+        return;
+      }
+
+      pointerDragSessionRef.current = {
+        item,
+        startX: e.clientX,
+        startY: e.clientY,
+        active: false,
+      };
+    },
+    [],
+  );
 
   const handleDragEndNode = useCallback(() => {
+    pointerDragSessionRef.current = null;
+    suppressInteractionRef.current = false;
     draggedItemRef.current = null;
     setDraggedItem(null);
+    setDragPointer(null);
+    setDropTargetPath(null);
+    setRootDropActive(false);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
+
+  const clearDropIndicators = useCallback(() => {
     setDropTargetPath(null);
     setRootDropActive(false);
   }, []);
 
-  const handleDropMove = useCallback(async (targetDirectoryPath = "") => {
-    const currentDraggedItem = draggedItemRef.current;
+  const resolveDropDestination = useCallback(
+    (target: EventTarget | null, dragPayload?: SidebarItemRef | null) => {
+      const currentDraggedItem = resolveDraggedScriptItem(dragPayload);
+      if (!currentDraggedItem) {
+        return null;
+      }
 
-    if (!currentDraggedItem || currentDraggedItem.source !== "scripts") {
+      const dropPath = getDropPathFromTarget(target);
+      if (dropPath && canDropInDirectory(dropPath, currentDraggedItem)) {
+        return { type: "directory" as const, path: dropPath, item: currentDraggedItem };
+      }
+
+      if (
+        isRootDropTarget(target) &&
+        getParentPath(currentDraggedItem.path) !== ""
+      ) {
+        return { type: "root" as const, path: "", item: currentDraggedItem };
+      }
+
+      return null;
+    },
+    [canDropInDirectory, resolveDraggedScriptItem],
+  );
+
+  const handleDropMove = useCallback(async (
+    targetDirectoryPath = "",
+    dragPayload?: SidebarItemRef | null,
+  ) => {
+    const currentDraggedItem = resolveDraggedScriptItem(dragPayload);
+
+    if (!currentDraggedItem) {
       return;
     }
 
@@ -1005,10 +1087,118 @@ export function Sidebar({
               oldPath: result.oldPath,
             },
       );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to move script entry";
+      alert(message);
     } finally {
       handleDragEndNode();
     }
-  }, [handleDragEndNode, onSidebarMutation]);
+  }, [handleDragEndNode, onSidebarMutation, resolveDraggedScriptItem]);
+
+  const handlePointerDragMove = useCallback(
+    (e: MouseEvent) => {
+      const session = pointerDragSessionRef.current;
+      if (!session) {
+        return;
+      }
+
+      const distance = Math.hypot(
+        e.clientX - session.startX,
+        e.clientY - session.startY,
+      );
+
+      if (!session.active) {
+        if (distance < 6) {
+          return;
+        }
+
+        session.active = true;
+        suppressInteractionRef.current = true;
+        draggedItemRef.current = session.item;
+        setDraggedItem(session.item);
+        document.body.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+      }
+
+      setDragPointer({ x: e.clientX, y: e.clientY });
+
+      const destination = resolveDropDestination(
+        document.elementFromPoint(e.clientX, e.clientY),
+        session.item,
+      );
+
+      if (!destination) {
+        clearDropIndicators();
+        return;
+      }
+
+      if (destination.type === "directory") {
+        setRootDropActive(false);
+        setDropTargetPath((prev) =>
+          prev === destination.path ? prev : destination.path,
+        );
+        return;
+      }
+
+      setDropTargetPath(null);
+      setRootDropActive(true);
+    },
+    [clearDropIndicators, resolveDropDestination],
+  );
+
+  const handlePointerDragEnd = useCallback(
+    (event?: MouseEvent) => {
+      const session = pointerDragSessionRef.current;
+      if (!session) {
+        return;
+      }
+
+      pointerDragSessionRef.current = null;
+
+      const activeSession = session.active;
+      const draggedScript = session.item;
+      let destination:
+        | { type: "directory" | "root"; path: string; item: SidebarItemRef }
+        | null = null;
+
+      if (activeSession && event) {
+        destination = resolveDropDestination(
+          document.elementFromPoint(event.clientX, event.clientY),
+          draggedScript,
+        );
+        window.setTimeout(() => {
+          suppressInteractionRef.current = false;
+        }, 0);
+      }
+
+      clearDropIndicators();
+
+      if (activeSession && destination) {
+        void handleDropMove(destination.path, draggedScript);
+        return;
+      }
+
+      handleDragEndNode();
+    },
+    [clearDropIndicators, handleDragEndNode, handleDropMove, resolveDropDestination],
+  );
+
+  useEffect(() => {
+    const handleWindowBlur = () => {
+      handleDragEndNode();
+    };
+
+    document.addEventListener("mousemove", handlePointerDragMove);
+    document.addEventListener("mouseup", handlePointerDragEnd);
+    window.addEventListener("blur", handleWindowBlur);
+
+    return () => {
+      document.removeEventListener("mousemove", handlePointerDragMove);
+      document.removeEventListener("mouseup", handlePointerDragEnd);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [handleDragEndNode, handlePointerDragEnd, handlePointerDragMove]);
 
   const openScriptNode = useCallback(
     (node: ScriptTreeNode) => {
@@ -1398,6 +1588,7 @@ export function Sidebar({
       )}
 
       <div
+        {...{ [SIDEBAR_ROOT_DROP_ATTR]: "true" }}
         style={{
           display: "flex",
           alignItems: "center",
@@ -1406,36 +1597,6 @@ export function Sidebar({
           background: rootDropActive ? `${accent.primary}12` : "transparent",
           borderTop: rootDropActive ? `1px dashed ${accent.primary}60` : "1px solid transparent",
           borderBottom: rootDropActive ? `1px dashed ${accent.primary}60` : "1px solid transparent",
-        }}
-        onDragOver={(e) => {
-          const currentDraggedItem = draggedItemRef.current;
-          if (!currentDraggedItem || currentDraggedItem.source !== "scripts") {
-            return;
-          }
-
-          if (getParentPath(currentDraggedItem.path) === "") {
-            return;
-          }
-
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "move";
-          setRootDropActive(true);
-          setDropTargetPath(null);
-        }}
-        onDragLeave={() => {
-          if (rootDropActive) {
-            setRootDropActive(false);
-          }
-        }}
-        onDrop={(e) => {
-          const currentDraggedItem = draggedItemRef.current;
-          if (!currentDraggedItem || currentDraggedItem.source !== "scripts") {
-            return;
-          }
-
-          e.preventDefault();
-          setRootDropActive(false);
-          void handleDropMove("");
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1614,16 +1775,10 @@ export function Sidebar({
                 setEditingPath(null);
                 setRenameValue("");
               }}
+              consumeInteractionSuppression={consumeInteractionSuppression}
+              onPointerDragStartNode={handlePointerDragStartNode}
               draggedPath={draggedItem?.path || null}
               dropTargetPath={dropTargetPath}
-              canDropOnDirectory={canDropInDirectory}
-              onDragOverDirectory={setDropTargetPath}
-              onDragStartNode={handleDragStartNode}
-              onDragEndNode={handleDragEndNode}
-              onDropOnDirectory={(targetPath) => {
-                setRootDropActive(false);
-                void handleDropMove(targetPath);
-              }}
               accentColor={accent.primary}
               forceExpanded={searchQuery.trim().length > 0}
             />
@@ -1668,6 +1823,14 @@ export function Sidebar({
           <Settings size={14} color={colors.textMuted} />
         </div>
       </div>
+
+      {draggedItem && dragPointer && (
+        <DragGhost
+          title={draggedItem.name}
+          x={dragPointer.x}
+          y={dragPointer.y}
+        />
+      )}
 
       {contextMenu.visible && contextMenu.item && (
         <div
