@@ -29,6 +29,21 @@ export interface CodeEditorProps {
 }
 
 let isLanguageRegistered = false;
+let lspProviders: Monaco.IDisposable[] = [];
+let lspProvidersEnabled = false;
+
+function syncLuauLspProviders(monaco: typeof Monaco, enabled: boolean): void {
+  if (enabled === lspProvidersEnabled) return;
+
+  if (enabled) {
+    lspProviders = registerLuauLspProviders(monaco);
+  } else {
+    lspProviders.forEach((provider) => provider.dispose());
+    lspProviders = [];
+  }
+
+  lspProvidersEnabled = enabled;
+}
 
 export function CodeEditor({
   value,
@@ -49,6 +64,9 @@ export function CodeEditor({
     const unsubscribe = subscribeToSettings(() => {
       const newSettings = getSettings().editor;
       setEditorSettings(newSettings);
+      if (monacoRef.current) {
+        syncLuauLspProviders(monacoRef.current, newSettings.luauLsp);
+      }
       if (editorRef.current) {
         editorRef.current.updateOptions({
           fontSize: newSettings.fontSize,
@@ -70,11 +88,11 @@ export function CodeEditor({
     if (!isLanguageRegistered) {
       registerLuauLanguage(monaco);
       registerLuauCompletionProvider(monaco);
-      registerLuauLspProviders(monaco);
       registerGhostTextProvider(monaco);
       loadUsageData();
       isLanguageRegistered = true;
     }
+    syncLuauLspProviders(monaco, getSettings().editor.luauLsp);
 
     monaco.editor.setTheme('synapsez-dark');
 
@@ -140,6 +158,7 @@ export function CodeEditor({
         loadUsageData();
         isLanguageRegistered = true;
       }
+      syncLuauLspProviders(monaco, getSettings().editor.luauLsp);
     });
   }, []);
 

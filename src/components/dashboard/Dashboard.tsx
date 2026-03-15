@@ -23,6 +23,7 @@ import { fileStore, type VirtualFile } from '../../stores/fileStore';
 import { loadSettings, getSettings, subscribeToSettings, WorkbenchSettings, updateWorkbenchSetting } from '../../stores/settingsStore';
 import { saveSession, loadSession } from '../../stores/sessionStore';
 import { executeScript } from '../../stores/attachStore';
+import { initializeConsoleListener } from '../../stores/consoleStore';
 import { transformScript, loadQolSettings } from '../../stores/qolStore';
 import { loadClientManager } from '../../stores/clientManagerStore';
 import {
@@ -265,6 +266,7 @@ export function Dashboard() {
     initializedRef.current = true;
     loadQolSettings();
     loadClientManager();
+    initializeConsoleListener();
 
     loadSettings().then(async () => {
       const settings = getSettings();

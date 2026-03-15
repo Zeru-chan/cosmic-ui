@@ -1,6 +1,7 @@
 mod vscode_bridge;
 mod explorer_bridge;
 mod dma_bridge;
+mod console_bridge;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,6 +13,7 @@ use tauri::{AppHandle, Listener, Manager, State};
 use vscode_bridge::VsCodeBridge;
 use explorer_bridge::ExplorerBridge;
 use dma_bridge::DmaBridge;
+use console_bridge::{ConsoleBridge, CONSOLE_PORT};
 
 #[cfg(target_os = "windows")]
 fn disable_webview_shortcuts(window: &tauri::WebviewWindow) {
@@ -62,6 +64,86 @@ struct ExplorerState {
 
 struct DmaState {
     bridge: DmaBridge,
+}
+
+struct ConsoleState {
+    bridge: ConsoleBridge,
+}
+
+fn get_console_wrapper(script: &str) -> String {
+    let mut delimiter_level = 1;
+    let mut closing = "]".to_string();
+    while script.contains(&closing) {
+        delimiter_level += 1;
+        closing = format!("]{}]", "=".repeat(delimiter_level));
+    }
+
+    let equals = "=".repeat(delimiter_level);
+    let open = format!("[{}[", equals);
+    let close = format!("]{}]", equals);
+
+    format!(
+        r#"local __synz_console_port = {port}
+local __synz_http_service = game:GetService("HttpService")
+local __synz_console_socket = nil
+
+pcall(function()
+    __synz_console_socket = WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
+end)
+
+local function __synz_console_send(level, ...)
+    if not __synz_console_socket then
+        return
+    end
+
+    local packed = table.pack(...)
+    local parts = table.create(packed.n)
+
+    for index = 1, packed.n do
+        parts[index] = tostring(packed[index])
+    end
+
+    local payload = __synz_http_service:JSONEncode({{ level = level, message = table.concat(parts, "\t") }})
+    pcall(function()
+        __synz_console_socket:Send(payload)
+    end)
+end
+
+local __synz_original_print = print
+local __synz_original_warn = warn
+
+print = function(...)
+    __synz_console_send("info", ...)
+    return __synz_original_print(...)
+end
+
+warn = function(...)
+    __synz_console_send("warning", ...)
+    return __synz_original_warn(...)
+end
+
+local function __synz_console_run()
+    local __synz_fn, __synz_err = loadstring({open}{script}{close}, "synz-ui-console")
+    if not __synz_fn then
+        error(__synz_err, 0)
+    end
+    return __synz_fn()
+end
+
+local __synz_ok, __synz_err = xpcall(__synz_console_run, function(err)
+    local trace = debug.traceback(tostring(err), 2)
+    __synz_console_send("error", trace)
+    return trace
+end)
+
+if not __synz_ok then
+    error(__synz_err, 0)
+end"#,
+        port = CONSOLE_PORT,
+        open = open,
+        script = script,
+        close = close,
+    )
 }
 
 fn get_sidecar_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -225,6 +307,22 @@ async fn execute_script(script: String, pids: Option<Vec<u32>>) -> Result<bool, 
     }
 
     Ok(true)
+}
+
+#[tauri::command]
+async fn execute_script_redirected(
+    app: AppHandle,
+    state: State<'_, ConsoleState>,
+    script: String,
+    pids: Option<Vec<u32>>,
+) -> Result<bool, String> {
+    state.bridge.start(app).await?;
+    execute_script(get_console_wrapper(&script), pids).await
+}
+
+#[tauri::command]
+fn get_console_port() -> u16 {
+    CONSOLE_PORT
 }
 
 #[tauri::command]
@@ -1359,6 +1457,9 @@ pub fn run() {
         .manage(DmaState {
             bridge: DmaBridge::new(),
         })
+        .manage(ConsoleState {
+            bridge: ConsoleBridge::new(),
+        })
         .setup(|app| {
             #[cfg(target_os = "windows")]
             {
@@ -1380,6 +1481,8 @@ pub fn run() {
             send_lsp_message,
             lsp_available,
             execute_script,
+            execute_script_redirected,
+            get_console_port,
             redeem_license,
             validate_license_session,
             handle_attach,

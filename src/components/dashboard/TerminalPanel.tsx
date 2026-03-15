@@ -3,24 +3,13 @@ import { colors } from '../../config/theme';
 import { IconButton } from '../shared/IconButton';
 import { Search, Filter, Trash2, Square, ChevronUp, X } from 'lucide-react';
 import {
-  getDiagnostics,
-  clearDiagnostics,
-  subscribeToDiagnostics,
-  Diagnostic,
-} from '../../stores/diagnosticStore';
-import { navigateToPosition } from '../../stores/editorNavigationStore';
+  getConsoleLogs,
+  clearConsoleLogs,
+  subscribeToConsoleLogs,
+  ConsoleLogEntry,
+} from '../../stores/consoleStore';
 
 export type LogType = 'info' | 'success' | 'warning' | 'error' | 'status';
-
-export interface LogEntry {
-  id: string;
-  type: LogType;
-  message: string;
-  timestamp: Date;
-  fileName?: string;
-  line?: number;
-  column?: number;
-}
 
 interface TerminalPanelProps {
   isOpen: boolean;
@@ -49,24 +38,12 @@ const FILTER_OPTIONS: { value: LogType | 'all'; label: string }[] = [
   { value: 'status', label: 'Status' },
 ];
 
-function diagnosticsToLogs(diagnostics: Diagnostic[]): LogEntry[] {
-  return diagnostics.map((d) => ({
-    id: d.id,
-    type: d.severity === 'error' ? 'error' : d.severity === 'warning' ? 'warning' : 'info',
-    message: d.message,
-    timestamp: d.timestamp,
-    fileName: d.fileName,
-    line: d.line,
-    column: d.column,
-  }));
-}
-
-export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, position, order, activeFileId }: TerminalPanelProps) {
+export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, position, order }: TerminalPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
   const [filterType, setFilterType] = useState<LogType | 'all'>('all');
   const [showFilter, setShowFilter] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logs, setLogs] = useState<ConsoleLogEntry[]>([]);
   const [isResizing, setIsResizing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -75,18 +52,12 @@ export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, positi
 
   useEffect(() => {
     const updateLogs = () => {
-      if (activeFileId) {
-        const diagnostics = getDiagnostics(activeFileId);
-        setLogs(diagnosticsToLogs(diagnostics));
-      } else {
-        setLogs([]);
-      }
+      setLogs(getConsoleLogs());
     };
 
     updateLogs();
-    const unsubscribe = subscribeToDiagnostics(updateLogs);
-    return unsubscribe;
-  }, [activeFileId]);
+    return subscribeToConsoleLogs(updateLogs);
+  }, []);
 
   useEffect(() => {
     if (logsEndRef.current) {
@@ -95,17 +66,15 @@ export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, positi
   }, [logs]);
 
   const handleClear = () => {
-    if (activeFileId) {
-      clearDiagnostics(activeFileId);
-    }
+    clearConsoleLogs();
   };
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
       if (!isResizing) return;
       e.preventDefault();
-      const delta = position === 'bottom' 
-        ? startY.current - e.clientY 
+      const delta = position === 'bottom'
+        ? startY.current - e.clientY
         : e.clientY - startY.current;
       const newHeight = startHeight.current + delta;
       const clampedHeight = Math.max(80, Math.min(500, newHeight));
@@ -141,7 +110,7 @@ export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, positi
   };
 
   const filteredLogs = logs.filter((log) => {
-    if (filterType !== 'all' && log.type !== filterType) return false;
+    if (filterType !== 'all' && log.level !== filterType) return false;
     if (searchQuery && !log.message.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     return true;
   });
@@ -156,7 +125,7 @@ export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, positi
         background: '#0d0d11',
         borderTop: position === 'bottom' && isOpen ? '1px solid #1a1a1f' : 'none',
         borderBottom: position === 'top' && isOpen ? '1px solid #1a1a1f' : 'none',
-        order: order,
+        order,
         overflow: 'hidden',
         transition: 'height 0.15s ease',
       }}
@@ -194,7 +163,7 @@ export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, positi
         />
 
         <span style={{ fontSize: 11, fontWeight: 600, color: colors.textMuted, letterSpacing: '0.05em' }}>
-          TERMINAL
+          CONSOLE
         </span>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -301,53 +270,28 @@ export function TerminalPanel({ isOpen, onToggle, height, onHeightChange, positi
       >
         {filteredLogs.length === 0 ? (
           <div style={{ color: colors.textMuted }}>
-            <div style={{ fontSize: 13, marginBottom: 4 }}>No issues detected</div>
-            <div style={{ fontSize: 11, opacity: 0.6 }}>Syntax errors and warnings will appear here</div>
+            <div style={{ fontSize: 13, marginBottom: 4 }}>No console output yet</div>
+            <div style={{ fontSize: 11, opacity: 0.6 }}>Redirected print, warn, and runtime errors will appear here</div>
           </div>
         ) : (
           <>
             {filteredLogs.map((log) => (
               <div
                 key={log.id}
-                onClick={() => {
-                  if (activeFileId && log.line && log.column) {
-                    navigateToPosition(activeFileId, log.line, log.column);
-                  }
-                }}
                 style={{
                   display: 'flex',
                   gap: 8,
                   marginBottom: 2,
                   padding: '3px 6px',
-                  color: LOG_TYPE_COLORS[log.type],
+                  color: LOG_TYPE_COLORS[log.level],
                   alignItems: 'flex-start',
-                  cursor: log.line ? 'pointer' : 'default',
                   borderRadius: 4,
-                  transition: 'background 0.1s ease',
-                }}
-                onMouseEnter={(e) => {
-                  if (log.line) e.currentTarget.style.background = '#15151a';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent';
                 }}
               >
                 <span style={{ opacity: 0.4, flexShrink: 0 }}>
-                  {log.type === 'error' ? '✕' : log.type === 'warning' ? '⚠' : 'ℹ'}
+                  {log.level === 'error' ? 'x' : log.level === 'warning' ? '!' : '>'}
                 </span>
-                <span style={{ flex: 1 }}>{log.message}</span>
-                {log.fileName && log.line && (
-                  <span style={{
-                    opacity: 0.5,
-                    flexShrink: 0,
-                    fontSize: 11,
-                    textDecoration: 'underline',
-                    textDecorationColor: 'rgba(255,255,255,0.15)',
-                    textUnderlineOffset: 2,
-                  }}>
-                    {log.fileName}:{log.line}:{log.column}
-                  </span>
-                )}
+                <span style={{ flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{log.message}</span>
               </div>
             ))}
             <div ref={logsEndRef} />

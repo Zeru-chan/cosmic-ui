@@ -7,6 +7,7 @@ export interface EditorSettings {
   wordWrap: boolean;
   lineNumbers: boolean;
   fontLigatures: boolean;
+  luauLsp: boolean;
 }
 
 export interface AutoAttachSettings {
@@ -55,6 +56,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     wordWrap: false,
     lineNumbers: true,
     fontLigatures: true,
+    luauLsp: true,
   },
   autoAttach: {
     enabled: false,

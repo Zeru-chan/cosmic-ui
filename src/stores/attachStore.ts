@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getSettings } from './settingsStore';
 
 type AttachState = 'detached' | 'attaching' | 'attached';
 
@@ -126,5 +127,7 @@ export async function executeScript(script: string): Promise<void> {
   }
 
   const pids = store.selectedPids.length > 0 ? store.selectedPids : undefined;
-  await invoke('execute_script', { script, pids });
+  const { client } = getSettings();
+  const command = client.redirectOutputs ? 'execute_script_redirected' : 'execute_script';
+  await invoke(command, { script, pids });
 }

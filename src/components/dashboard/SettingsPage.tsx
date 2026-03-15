@@ -9,6 +9,7 @@ import {
   updateAutoAttachSetting,
   updateAppearanceSetting,
   updateWorkbenchSetting,
+  updateClientSetting,
   subscribeToSettings,
   AppSettings,
 } from '../../stores/settingsStore';
@@ -477,6 +478,14 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
               />
             </SettingRow>
 
+            <SettingRow label="Luau LSP" description="Enable Luau hover and signature assistance in the editor">
+              <ToggleSwitch
+                checked={settings.editor.luauLsp}
+                onChange={(v) => updateEditorSetting('luauLsp', v)}
+                accentColor={accent.primary}
+              />
+            </SettingRow>
+
             <div style={{ marginBottom: 24, marginTop: 40 }}>
               <h2 style={{ fontSize: 18, fontWeight: 600, color: colors.textWhite, marginBottom: 8 }}>Runtime Preparation</h2>
               <p style={{ fontSize: 13, color: colors.textMuted }}>Configure how Synapse Z readies the local execution runtime</p>
@@ -657,6 +666,27 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
                 step={10}
                 onChange={(v) => updateWorkbenchSetting('sidebarWidth', v)}
                 suffix="px"
+                accentColor={accent.primary}
+              />
+            </SettingRow>
+          </>
+        );
+
+      case 'client':
+        return (
+          <>
+            <div style={{ marginBottom: 24 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 600, color: colors.textWhite, marginBottom: 8 }}>Client</h2>
+              <p style={{ fontSize: 13, color: colors.textMuted }}>Configure execution and console routing</p>
+            </div>
+
+            <SettingRow
+              label="Console Redirection"
+              description="Redirect print, warn, and uncaught runtime errors into the built-in console panel"
+            >
+              <ToggleSwitch
+                checked={settings.client.redirectOutputs}
+                onChange={(v) => updateClientSetting('redirectOutputs', v)}
                 accentColor={accent.primary}
               />
             </SettingRow>
@@ -1114,7 +1144,14 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
             label="General"
             accentColor={accent.primary}
           />
-                    <TabButton
+          <TabButton
+            active={activeTab === 'client'}
+            onClick={() => setActiveTab('client')}
+            icon={<Lock size={18} />}
+            label="Client"
+            accentColor={accent.primary}
+          />
+          <TabButton
             active={activeTab === 'quickExecute'}
             onClick={() => setActiveTab('quickExecute')}
             icon={<Zap size={18} />}
