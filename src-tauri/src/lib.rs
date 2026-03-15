@@ -1374,6 +1374,25 @@ struct RobloxUserInfo {
     display_name: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RobloxUsernameLookupRequest {
+    usernames: Vec<String>,
+    exclude_banned_users: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RobloxUsernameLookupEntry {
+    id: u64,
+    name: String,
+    display_name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RobloxUsernameLookupResponse {
+    data: Vec<RobloxUsernameLookupEntry>,
+}
+
 #[tauri::command]
 async fn fetch_roblox_user_from_cookie(cookie: String) -> Result<RobloxUserInfo, String> {
     let client = reqwest::Client::new();
@@ -1396,6 +1415,46 @@ async fn fetch_roblox_user_from_cookie(cookie: String) -> Result<RobloxUserInfo,
         id: info["id"].as_u64().unwrap_or(0),
         name: info["name"].as_str().unwrap_or("").to_string(),
         display_name: info["displayName"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+#[tauri::command]
+async fn fetch_roblox_user_by_username(username: String) -> Result<RobloxUserInfo, String> {
+    let trimmed = username.trim();
+    if trimmed.is_empty() {
+        return Err("Username is required".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://users.roblox.com/v1/usernames/users")
+        .json(&RobloxUsernameLookupRequest {
+            usernames: vec![trimmed.to_string()],
+            exclude_banned_users: false,
+        })
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Username lookup failed (HTTP {})", response.status()));
+    }
+
+    let body: RobloxUsernameLookupResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    let user = body
+        .data
+        .into_iter()
+        .next()
+        .ok_or("User not found")?;
+
+    Ok(RobloxUserInfo {
+        id: user.id,
+        name: user.name,
+        display_name: user.display_name,
     })
 }
 
@@ -1573,6 +1632,7 @@ pub fn run() {
             launch_dma_exe,
             get_dma_port,
             fetch_roblox_user_from_cookie,
+            fetch_roblox_user_by_username,
             fetch_roblox_avatar,
             fetch_roblox_game_details,
             get_roblox_auth_ticket,

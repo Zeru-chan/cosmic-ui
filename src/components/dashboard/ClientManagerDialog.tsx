@@ -14,6 +14,11 @@ import {
   RobloxGame,
 } from '../../stores/clientManagerStore';
 
+type LaunchTarget =
+  | { type: 'game'; game: RobloxGame }
+  | { type: 'user'; username: string; userId: number; displayName: string }
+  | { type: 'job'; placeId: number; jobId: string };
+
 interface ClientManagerDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -24,9 +29,12 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
   const [activeTab, setActiveTab] = useState<'accounts' | 'games'>('accounts');
   const [cookieInput, setCookieInput] = useState('');
   const [gameIdInput, setGameIdInput] = useState('');
+  const [joinUsernameInput, setJoinUsernameInput] = useState('');
+  const [joinPlaceIdInput, setJoinPlaceIdInput] = useState('');
+  const [joinJobIdInput, setJoinJobIdInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [launchGame, setLaunchGame] = useState<RobloxGame | null>(null);
+  const [launchTarget, setLaunchTarget] = useState<LaunchTarget | null>(null);
   const cookieRef = useRef<HTMLInputElement>(null);
   const gameRef = useRef<HTMLInputElement>(null);
 
@@ -48,13 +56,13 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
     if (!isOpen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (launchGame) setLaunchGame(null);
+        if (launchTarget) setLaunchTarget(null);
         else onClose();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isOpen, onClose, launchGame]);
+  }, [isOpen, onClose, launchTarget]);
 
   if (!isOpen) return null;
 
@@ -90,7 +98,55 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
       setError('Add an account first before launching a game');
       return;
     }
-    setLaunchGame(game);
+    setLaunchTarget({ type: 'game', game });
+  };
+
+  const handleJoinUser = async () => {
+    const username = joinUsernameInput.trim();
+    if (!username || loading) return;
+    if (data.accounts.length === 0) {
+      setError('Add an account first before joining a user');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      const user = await invoke<{ id: number; name: string; displayName: string }>(
+        'fetch_roblox_user_by_username',
+        { username }
+      );
+      setLaunchTarget({
+        type: 'user',
+        username: user.name,
+        userId: user.id,
+        displayName: user.displayName,
+      });
+      setJoinUsernameInput('');
+    } catch (e: any) {
+      setError(e.message || 'Failed to find user');
+    }
+    setLoading(false);
+  };
+
+  const handleJoinJob = () => {
+    const placeId = parseInt(joinPlaceIdInput.trim(), 10);
+    const jobId = joinJobIdInput.trim();
+
+    if (loading) return;
+    if (data.accounts.length === 0) {
+      setError('Add an account first before joining a job ID');
+      return;
+    }
+    if (isNaN(placeId) || !jobId) {
+      setError('Enter both a place ID and a job ID');
+      return;
+    }
+
+    setError('');
+    setLaunchTarget({ type: 'job', placeId, jobId });
+    setJoinPlaceIdInput('');
+    setJoinJobIdInput('');
   };
 
   return (
@@ -223,7 +279,7 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
             </>
           ) : (
             <>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
                 <input
                   ref={gameRef}
                   type="text"
@@ -249,6 +305,85 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
                 <AddButton onClick={handleAddGame} loading={loading} />
               </div>
 
+              <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                <input
+                  type="text"
+                  placeholder="Join username..."
+                  value={joinUsernameInput}
+                  onChange={(e) => setJoinUsernameInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleJoinUser()}
+                  style={{
+                    flex: 1,
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.07)',
+                    borderRadius: 9,
+                    color: colors.textWhite,
+                    outline: 'none',
+                    fontFamily: 'inherit',
+                    transition: 'border-color 0.15s ease',
+                  }}
+                  onFocus={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)'}
+                  onBlur={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)'}
+                />
+                <ActionButton
+                  label={loading ? 'Finding...' : 'Join'}
+                  onClick={handleJoinUser}
+                  loading={loading}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                <input
+                  type="text"
+                  placeholder="Place ID..."
+                  value={joinPlaceIdInput}
+                  onChange={(e) => setJoinPlaceIdInput(e.target.value.replace(/\D/g, ''))}
+                  onKeyDown={(e) => e.key === 'Enter' && handleJoinJob()}
+                  style={{
+                    width: 130,
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.07)',
+                    borderRadius: 9,
+                    color: colors.textWhite,
+                    outline: 'none',
+                    fontFamily: 'inherit',
+                    transition: 'border-color 0.15s ease',
+                  }}
+                  onFocus={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)'}
+                  onBlur={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)'}
+                />
+                <input
+                  type="text"
+                  placeholder="Job ID..."
+                  value={joinJobIdInput}
+                  onChange={(e) => setJoinJobIdInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleJoinJob()}
+                  style={{
+                    flex: 1,
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.07)',
+                    borderRadius: 9,
+                    color: colors.textWhite,
+                    outline: 'none',
+                    fontFamily: 'inherit',
+                    transition: 'border-color 0.15s ease',
+                  }}
+                  onFocus={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)'}
+                  onBlur={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)'}
+                />
+                <ActionButton
+                  label="Join Job"
+                  onClick={handleJoinJob}
+                  loading={loading}
+                />
+              </div>
+
               {error && <ErrorBanner message={error} />}
 
               <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -272,19 +407,19 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
         </div>
       </div>
 
-      {launchGame && (
+      {launchTarget && (
         <LaunchPrompt
-          game={launchGame}
+          target={launchTarget}
           accounts={data.accounts}
-          onClose={() => setLaunchGame(null)}
+          onClose={() => setLaunchTarget(null)}
         />
       )}
     </div>
   );
 }
 
-function LaunchPrompt({ game, accounts, onClose }: {
-  game: RobloxGame;
+function LaunchPrompt({ target, accounts, onClose }: {
+  target: LaunchTarget;
   accounts: RobloxAccount[];
   onClose: () => void;
 }) {
@@ -314,6 +449,7 @@ function LaunchPrompt({ game, accounts, onClose }: {
     if (selected.size === 0 || launching) return;
     setLaunching(true);
     setLaunchError('');
+    let errorMessage = '';
 
     const selectedAccounts = accounts.filter((a) => selected.has(a.id));
     let launched = 0;
@@ -324,21 +460,27 @@ function LaunchPrompt({ game, accounts, onClose }: {
         const ticket = await invoke<string>('get_roblox_auth_ticket', { cookie: account.cookie });
         const timestamp = Date.now();
         const browserId = Math.floor(Math.random() * 1000000000);
-        const launchUrl = `roblox-player:1+launchmode:play+gameinfo:${ticket}+launchtime:${timestamp}+placelauncherurl:https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame%26placeId=${game.placeId}%26isPlayTogetherGame=false+browsertrackerid:${browserId}+robloxLocale:en_us+gameLocale:en_us`;
+        const placeLauncherUrl = target.type === 'game'
+          ? `https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame%26placeId=${target.game.placeId}%26isPlayTogetherGame=false`
+          : target.type === 'user'
+            ? `https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestFollowUser%26userId=${target.userId}`
+            : `https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGameJob%26placeId=${target.placeId}%26gameId=${encodeURIComponent(target.jobId)}`;
+        const launchUrl = `roblox-player:1+launchmode:play+gameinfo:${ticket}+launchtime:${timestamp}+placelauncherurl:${placeLauncherUrl}+browsertrackerid:${browserId}+robloxLocale:en_us+gameLocale:en_us`;
         await invoke('open_roblox_url', { url: launchUrl });
         launched++;
         if (selectedAccounts.length > 1 && launched < selectedAccounts.length) {
           await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (e: any) {
-        setLaunchError(`Failed to launch as ${account.username}: ${e.message || e}`);
+        errorMessage = `Failed to launch as ${account.username}: ${e.message || e}`;
+        setLaunchError(errorMessage);
         break;
       }
     }
 
     setLaunchStatus('');
     setLaunching(false);
-    if (!launchError && launched > 0) {
+    if (!errorMessage && launched > 0) {
       onClose();
     }
   };
@@ -376,14 +518,14 @@ function LaunchPrompt({ game, accounts, onClose }: {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <span style={{ fontSize: 14, fontWeight: 600, color: '#e8e8f0' }}>
-              Launch Game
+              {target.type === 'game' ? 'Launch Game' : target.type === 'user' ? 'Join User' : 'Join Job ID'}
             </span>
             <CloseButton onClick={onClose} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {game.thumbnailUrl ? (
+            {target.type === 'game' && target.game.thumbnailUrl ? (
               <img
-                src={game.thumbnailUrl}
+                src={target.game.thumbnailUrl}
                 alt=""
                 style={{ width: 32, height: 32, borderRadius: 6, objectFit: 'cover', background: 'rgba(255,255,255,0.04)' }}
               />
@@ -393,8 +535,12 @@ function LaunchPrompt({ game, accounts, onClose }: {
               </div>
             )}
             <div>
-              <div style={{ fontSize: 13, fontWeight: 500, color: '#c0c0cc', lineHeight: '17px' }}>{game.name}</div>
-              <div style={{ fontSize: 11, color: '#55556a', lineHeight: '15px' }}>{game.placeId}</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: '#c0c0cc', lineHeight: '17px' }}>
+                {target.type === 'game' ? target.game.name : target.type === 'user' ? `@${target.username}` : target.jobId}
+              </div>
+              <div style={{ fontSize: 11, color: '#55556a', lineHeight: '15px' }}>
+                {target.type === 'game' ? target.game.placeId : target.type === 'user' ? `${target.displayName} • ID: ${target.userId}` : `Place ID: ${target.placeId}`}
+              </div>
             </div>
           </div>
         </div>
@@ -702,6 +848,36 @@ function AddButton({ onClick, loading }: { onClick: () => void; loading: boolean
     >
       {loading && <Loader2 size={14} style={{ animation: 'loaderSpin 1s linear infinite' }} />}
       {loading ? 'Adding...' : 'Add'}
+    </button>
+  );
+}
+
+function ActionButton({ onClick, loading, label }: { onClick: () => void; loading: boolean; label: string }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        padding: '10px 18px',
+        fontSize: 13,
+        fontWeight: 600,
+        background: loading ? 'rgba(74,222,128,0.08)' : hovered ? 'rgba(74,222,128,0.22)' : 'rgba(74,222,128,0.15)',
+        color: loading ? '#58a978' : '#4ADE80',
+        border: '1px solid rgba(74,222,128,0.12)',
+        borderRadius: 9,
+        cursor: loading ? 'not-allowed' : 'pointer',
+        transition: 'all 0.15s ease',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {loading && <Loader2 size={14} style={{ animation: 'loaderSpin 1s linear infinite' }} />}
+      {label}
     </button>
   );
 }
