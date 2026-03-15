@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { colors } from '../../config/theme';
 import { useAccentColor } from '../../hooks/useAccentColor';
+import { loadPersistedJson, savePersistedJson } from '../../stores/persistedJson';
 import {
   getSettings,
   loadSettings,
@@ -9,10 +10,17 @@ import {
   updateAutoAttachSetting,
   updateAppearanceSetting,
   updateWorkbenchSetting,
-  updateClientSetting,
   subscribeToSettings,
   AppSettings,
 } from '../../stores/settingsStore';
+import {
+  getClientSettings,
+  loadClientSettings,
+  subscribeToClientSettings,
+  updateClientSynSetting,
+  ClientSynSettings,
+  ClientSettingValue,
+} from '../../stores/clientSettingsStore';
 import {
   getQuickExecuteSettings,
   saveQuickExecuteSettings,
@@ -44,6 +52,8 @@ import {
   KEYBIND_DESCRIPTIONS,
 } from '../../stores/keybindsStore';
 import { ArrowLeft, Layout, Type, Code, Zap, Keyboard, RotateCcw, Wand2, Plus, Trash2, Lock } from 'lucide-react';
+
+const CLIENT_WARNING_PREFS_FILE = 'client-warning-prefs.json';
 
 function isLightAccent(hex: string): boolean {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -353,6 +363,10 @@ function OptionButton({ label, selected, onClick, accentColor }: OptionButtonPro
 
 export function SettingsPage({ onBack }: SettingsPageProps) {
   const [settings, setSettings] = useState<AppSettings>(getSettings());
+  const [clientSettings, setClientSettings] = useState<ClientSynSettings>(getClientSettings());
+  const [showClientRestartWarning, setShowClientRestartWarning] = useState(false);
+  const [clientWarningDontShowAgain, setClientWarningDontShowAgain] = useState(false);
+  const [clientWarningEnabled, setClientWarningEnabled] = useState(true);
   const [quickExecuteSettings, setQuickExecuteSettings] = useState<QuickExecuteSettings>(getQuickExecuteSettings());
   const [keybindsSettings, setKeybindsSettings] = useState<KeybindsSettings>(getKeybinds());
   const [qolSettings, setQolSettings] = useState<QolSettings>(getQolSettings());
@@ -365,6 +379,10 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
 
   useEffect(() => {
     loadSettings();
+    loadClientSettings();
+    loadPersistedJson<{ enabled: boolean }>(CLIENT_WARNING_PREFS_FILE, { enabled: true }).then((prefs) => {
+      setClientWarningEnabled(prefs.enabled !== false);
+    });
     loadQuickExecuteSettings();
     loadKeybinds();
     loadQolSettings();
@@ -374,6 +392,9 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
     const unsubscribeQE = subscribeToQuickExecute(() => {
       setQuickExecuteSettings(getQuickExecuteSettings());
     });
+    const unsubscribeClient = subscribeToClientSettings(() => {
+      setClientSettings(getClientSettings());
+    });
     const unsubscribeKB = subscribeToKeybinds(() => {
       setKeybindsSettings(getKeybinds());
     });
@@ -382,6 +403,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
     });
     return () => {
       unsubscribe();
+      unsubscribeClient();
       unsubscribeQE();
       unsubscribeKB();
       unsubscribeQol();
@@ -413,6 +435,69 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
       saveKeybinds({ [field]: keybind });
     }
     setEditingKeybind(null);
+  };
+
+  const persistClientWarningPreference = async (enabled: boolean) => {
+    setClientWarningEnabled(enabled);
+    await savePersistedJson(CLIENT_WARNING_PREFS_FILE, { enabled });
+  };
+
+  const handleClientBooleanToggle = async (key: string, value: boolean) => {
+    await updateClientSynSetting(key, value);
+
+    if (clientWarningEnabled) {
+      setClientWarningDontShowAgain(false);
+      setShowClientRestartWarning(true);
+    }
+  };
+
+  const formatClientSettingLabel = (key: string) =>
+    key
+      .split('_')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+
+  const renderClientSettingControl = (key: string, value: ClientSettingValue) => {
+    if (typeof value === 'boolean') {
+      return (
+        <ToggleSwitch
+          checked={value}
+          onChange={(next) => handleClientBooleanToggle(key, next)}
+          accentColor={accent.primary}
+        />
+      );
+    }
+
+    if (typeof value === 'number') {
+      return (
+        <NumberInput
+          value={value}
+          min={Number.MIN_SAFE_INTEGER}
+          max={Number.MAX_SAFE_INTEGER}
+          step={Number.isInteger(value) ? 1 : 0.1}
+          onChange={(next) => updateClientSynSetting(key, next)}
+          accentColor={accent.primary}
+        />
+      );
+    }
+
+    return (
+      <input
+        type="text"
+        value={value ?? ''}
+        onChange={(e) => updateClientSynSetting(key, e.target.value)}
+        style={{
+          width: 220,
+          background: '#1a1a1f',
+          border: '1px solid #2a2a35',
+          borderRadius: 6,
+          padding: '7px 10px',
+          color: colors.textWhite,
+          fontSize: 12,
+          outline: 'none',
+        }}
+      />
+    );
   };
 
   const renderContent = () => {
@@ -673,23 +758,28 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
         );
 
       case 'client':
+        const clientEntries = Object.entries(clientSettings).sort(([a], [b]) => a.localeCompare(b));
+
         return (
           <>
             <div style={{ marginBottom: 24 }}>
               <h2 style={{ fontSize: 18, fontWeight: 600, color: colors.textWhite, marginBottom: 8 }}>Client</h2>
-              <p style={{ fontSize: 13, color: colors.textMuted }}>Configure execution and console routing</p>
+              <p style={{ fontSize: 13, color: colors.textMuted }}>Configure client behavior. Restart Roblox after enabling or disabling any of these settings.</p>
             </div>
 
-            <SettingRow
-              label="Console Redirection"
-              description="Redirect print, warn, and uncaught runtime errors into the built-in console panel"
-            >
-              <ToggleSwitch
-                checked={settings.client.redirectOutputs}
-                onChange={(v) => updateClientSetting('redirectOutputs', v)}
-                accentColor={accent.primary}
-              />
-            </SettingRow>
+            {clientEntries.length === 0 ? (
+              <div style={{ fontSize: 13, color: colors.textMuted }}>No client settings were found.</div>
+            ) : (
+              clientEntries.map(([key, value]) => (
+                <SettingRow
+                  key={key}
+                  label={formatClientSettingLabel(key)}
+                  description={key}
+                >
+                  {renderClientSettingControl(key, value)}
+                </SettingRow>
+              ))
+            )}
           </>
         );
 
@@ -1178,6 +1268,83 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
       <div style={{ flex: 1, overflowY: 'auto', padding: '40px 60px' }}>
         {renderContent()}
       </div>
+
+      {showClientRestartWarning && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 10001,
+          }}
+          onClick={() => setShowClientRestartWarning(false)}
+        >
+          <div
+            style={{
+              width: 420,
+              maxWidth: 'calc(100vw - 32px)',
+              background: '#12121a',
+              border: '1px solid #2a2a35',
+              borderRadius: 12,
+              padding: 24,
+              boxShadow: '0 16px 64px rgba(0,0,0,0.5)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 17, fontWeight: 600, color: colors.textWhite, marginBottom: 10 }}>
+              Restart Roblox Required
+            </div>
+            <div style={{ fontSize: 13, color: colors.textMuted, lineHeight: 1.5, marginBottom: 18 }}>
+              You must restart Roblox after enabling or disabling any client setting for the change to take effect.
+            </div>
+
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                fontSize: 13,
+                color: colors.textWhite,
+                marginBottom: 20,
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={clientWarningDontShowAgain}
+                onChange={(e) => setClientWarningDontShowAgain(e.target.checked)}
+              />
+              Don't show again
+            </label>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={async () => {
+                  if (clientWarningDontShowAgain) {
+                    await persistClientWarningPreference(false);
+                  }
+                  setShowClientRestartWarning(false);
+                }}
+                style={{
+                  background: accent.primary,
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '9px 16px',
+                  color: isLightAccent(accent.primary) ? '#0B0B0F' : colors.textWhite,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

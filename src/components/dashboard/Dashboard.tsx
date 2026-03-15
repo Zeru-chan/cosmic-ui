@@ -24,6 +24,7 @@ import { loadSettings, getSettings, subscribeToSettings, WorkbenchSettings, upda
 import { saveSession, loadSession } from '../../stores/sessionStore';
 import { executeScript } from '../../stores/attachStore';
 import { initializeConsoleListener } from '../../stores/consoleStore';
+import { loadClientSettings } from '../../stores/clientSettingsStore';
 import { transformScript, loadQolSettings } from '../../stores/qolStore';
 import { loadClientManager } from '../../stores/clientManagerStore';
 import {
@@ -267,6 +268,7 @@ export function Dashboard() {
     loadQolSettings();
     loadClientManager();
     initializeConsoleListener();
+    loadClientSettings();
 
     loadSettings().then(async () => {
       const settings = getSettings();

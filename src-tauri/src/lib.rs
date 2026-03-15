@@ -70,6 +70,48 @@ struct ConsoleState {
     bridge: ConsoleBridge,
 }
 
+fn get_synapse_settings_path() -> Result<std::path::PathBuf, String> {
+    let local_app_data = std::env::var("LOCALAPPDATA")
+        .map_err(|_| "Failed to get LOCALAPPDATA environment variable".to_string())?;
+    Ok(std::path::Path::new(&local_app_data)
+        .join("Synapse Z")
+        .join("bin")
+        .join("settings.syn"))
+}
+
+#[tauri::command]
+fn load_client_settings_syn() -> Result<serde_json::Value, String> {
+    let path = get_synapse_settings_path()?;
+
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read settings.syn: {}", e))?;
+
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse settings.syn: {}", e))
+}
+
+#[tauri::command]
+fn save_client_settings_syn(settings: serde_json::Value) -> Result<bool, String> {
+    let path = get_synapse_settings_path()?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create settings folder: {}", e))?;
+    }
+
+    let serialized = serde_json::to_string(&settings)
+        .map_err(|e| format!("Failed to serialize settings.syn: {}", e))?;
+
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("Failed to write settings.syn: {}", e))?;
+
+    Ok(true)
+}
+
 fn get_console_wrapper(script: &str) -> String {
     let mut delimiter_level = 1;
     let mut closing = "]".to_string();
@@ -1483,6 +1525,8 @@ pub fn run() {
             execute_script,
             execute_script_redirected,
             get_console_port,
+            load_client_settings_syn,
+            save_client_settings_syn,
             redeem_license,
             validate_license_session,
             handle_attach,
