@@ -14,6 +14,7 @@ import {
   MoreHorizontal,
   Plus,
   Save,
+  Syringe,
   X,
 } from 'lucide-react';
 import type { PaneTabKind } from '../../stores/splitStore';
@@ -38,6 +39,7 @@ interface TabBarProps {
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
   onRunClick: () => void;
+  onInjectClick: () => void;
   showRunButton?: boolean;
   hideRunButton?: boolean;
   paneId: string;
@@ -349,6 +351,7 @@ export function TabBar({
   onTabClick,
   onTabClose,
   onRunClick,
+  onInjectClick,
   showRunButton = false,
   hideRunButton = false,
   paneId,
@@ -775,6 +778,25 @@ export function TabBar({
             </svg>
           </div>
         )}
+
+        <div
+          onClick={onInjectClick}
+          style={{
+            width: 36,
+            height: 36,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 10,
+            cursor: 'pointer',
+            background: 'rgba(255,255,255,0.02)',
+            transition: 'background 0.15s ease',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+          onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+        >
+          <Syringe size={15} color={colors.textMuted} />
+        </div>
 
         <div ref={moreButtonRef} style={{ position: 'relative' }}>
           <div
