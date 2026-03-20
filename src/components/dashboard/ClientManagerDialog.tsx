@@ -1,7 +1,8 @@
 import { useState, useEffect, useSyncExternalStore, useRef } from 'react';
 import { colors } from '../../config/theme';
-import { X, Trash2, Users, Gamepad2, Loader2, AlertCircle, Play, Copy, Check } from 'lucide-react';
+import { X, Trash2, Users, Gamepad2, Loader2, AlertCircle, Play, Copy, Check, Syringe, MoreHorizontal } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { injectRoblox } from '../../stores/attachStore';
 import {
   loadClientManager,
   getClientManager,
@@ -99,6 +100,18 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
       return;
     }
     setLaunchTarget({ type: 'game', game });
+  };
+
+  const handleInjectClick = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError('');
+    try {
+      await injectRoblox();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to inject');
+    }
+    setLoading(false);
   };
 
   const handleJoinUser = async () => {
@@ -398,6 +411,7 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
                         void removeGame(game.id);
                       }}
                       onLaunch={() => handlePlayClick(game)}
+                      onInject={handleInjectClick}
                     />
                   ))
                 )}
@@ -1020,13 +1034,17 @@ function AccountCard({ account, onRemove }: { account: RobloxAccount; onRemove: 
   );
 }
 
-function GameCard({ game, onRemove, onLaunch }: { game: RobloxGame; onRemove: () => void; onLaunch: () => void }) {
+function GameCard({ game, onRemove, onLaunch, onInject }: { game: RobloxGame; onRemove: () => void; onLaunch: () => void; onInject: () => void }) {
   const [hovered, setHovered] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
     <div
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseLeave={() => {
+        setHovered(false);
+        setMenuOpen(false);
+      }}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -1090,18 +1108,129 @@ function GameCard({ game, onRemove, onLaunch }: { game: RobloxGame; onRemove: ()
 
       <div style={{ display: 'flex', gap: 4 }}>
         <PlayButton onClick={onLaunch} visible={hovered} />
-        <div style={{
-          opacity: hovered ? 1 : 0,
-          transition: 'opacity 0.15s ease',
-        }}>
-          <IconButton
-            icon={<Trash2 size={13} />}
-            tooltip="Remove"
-            onClick={onRemove}
-            danger
-          />
-        </div>
+        <InjectButton onClick={onInject} visible={hovered} />
+        <MoreButton
+          visible={hovered || menuOpen}
+          open={menuOpen}
+          onToggle={() => setMenuOpen((prev) => !prev)}
+          onRemove={onRemove}
+        />
       </div>
+    </div>
+  );
+}
+
+function MoreButton({
+  visible,
+  open,
+  onToggle,
+  onRemove,
+}: {
+  visible: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onRemove: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{
+          width: 28,
+          height: 28,
+          borderRadius: 7,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          transition: 'all 0.15s ease',
+          background: hovered || open ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
+          opacity: visible ? 1 : 0,
+        }}
+      >
+        <MoreHorizontal size={13} color={open ? '#e0e0ea' : '#8a8aa0'} />
+      </div>
+
+      {open && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: 34,
+            right: 0,
+            minWidth: 120,
+            padding: 6,
+            borderRadius: 10,
+            background: '#12121a',
+            border: '1px solid rgba(255,255,255,0.08)',
+            boxShadow: '0 16px 40px rgba(0,0,0,0.45)',
+            zIndex: 10,
+          }}
+        >
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove();
+            }}
+            style={{
+              width: '100%',
+              border: 'none',
+              borderRadius: 8,
+              background: 'transparent',
+              color: '#ff7a90',
+              fontSize: 12,
+              fontWeight: 600,
+              padding: '8px 10px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              cursor: 'pointer',
+            }}
+          >
+            <Trash2 size={13} />
+            Remove
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InjectButton({ onClick, visible }: { onClick: () => void; visible: boolean }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        height: 28,
+        paddingLeft: 8,
+        paddingRight: 10,
+        borderRadius: 7,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 5,
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        background: hovered ? 'rgba(96,165,250,0.18)' : 'rgba(96,165,250,0.1)',
+        opacity: visible ? 1 : 0,
+        fontSize: 12,
+        fontWeight: 600,
+        color: '#60A5FA',
+      }}
+    >
+      <Syringe size={11} />
+      Inject
     </div>
   );
 }
