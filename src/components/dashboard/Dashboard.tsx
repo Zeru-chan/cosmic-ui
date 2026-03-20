@@ -13,7 +13,6 @@ import { SplitContainer } from './SplitContainer';
 import { DropZoneOverlay } from './DropZoneOverlay';
 import { DragGhost } from './DragGhost';
 import { SettingsPage } from './SettingsPage';
-import { AccountPage } from './AccountPage';
 import { ScriptHub } from './ScriptHub';
 import { FloatingExecuteButton } from './FloatingExecuteButton';
 import { QuickFilePicker } from './QuickFilePicker';
@@ -22,7 +21,7 @@ import { FileViewer } from './FileViewer';
 import { fileStore, type VirtualFile } from '../../stores/fileStore';
 import { loadSettings, getSettings, subscribeToSettings, WorkbenchSettings, updateWorkbenchSetting } from '../../stores/settingsStore';
 import { saveSession, loadSession } from '../../stores/sessionStore';
-import { executeScript } from '../../stores/attachStore';
+import { executeScript, injectRoblox } from '../../stores/attachStore';
 import { initializeConsoleListener } from '../../stores/consoleStore';
 import { loadClientSettings } from '../../stores/clientSettingsStore';
 import { transformScript, loadQolSettings } from '../../stores/qolStore';
@@ -253,7 +252,7 @@ function WindowButton({ onClick, tooltip, children, isClose }: WindowButtonProps
 export function Dashboard() {
   const appWindow = getCurrentWindow();
   const store = useSyncExternalStore(subscribe, getStore);
-  const [activeView, setActiveView] = useState<'editor' | 'settings' | 'account'>('editor');
+  const [activeView, setActiveView] = useState<'editor' | 'settings'>('editor');
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(180);
   const [workbenchSettings, setWorkbenchSettings] = useState<WorkbenchSettings>(DEFAULT_WORKBENCH_SETTINGS);
@@ -862,6 +861,7 @@ export function Dashboard() {
             onTabClick={(tabId) => setActiveTab(paneId, tabId)}
             onTabClose={(tabId) => removeTabFromPane(paneId, tabId)}
             onRunClick={handleExecuteScript(paneId)}
+            onInjectClick={() => { void injectRoblox(); }}
             showRunButton={showRunButton}
             hideRunButton={workbenchSettings.floatingExecuteButton}
             paneId={paneId}
@@ -989,7 +989,7 @@ export function Dashboard() {
               color: colors.textMuted,
             }}
           >
-            {activeView === 'settings' ? 'Settings' : activeView === 'account' ? 'Account' : 'Synapse Z'}
+            {activeView === 'settings' ? 'Settings' : 'Synapse Z'}
           </span>
         </div>
 
@@ -1018,7 +1018,6 @@ export function Dashboard() {
               onWorkspaceFileOpen={openWorkspaceFileInPane}
               onSidebarMutation={handleSidebarMutation}
               onSettingsClick={() => setActiveView('settings')}
-              onAccountClick={() => setActiveView('account')}
               onScriptHubClick={handleScriptHubOpen}
               onClientManagerClick={() => setClientManagerOpen(true)}
               onRevealInExplorer={handleRevealInExplorer}
@@ -1050,8 +1049,6 @@ export function Dashboard() {
               </div>
             </div>
           </div>
-        ) : activeView === 'account' ? (
-          <AccountPage onBack={handleBackToEditor} />
         ) : (
           <SettingsPage onBack={handleBackToEditor} />
         )}
