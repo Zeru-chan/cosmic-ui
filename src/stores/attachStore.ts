@@ -1,11 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
-import { getClientSettings } from './clientSettingsStore';
 
-type AttachState = 'detached' | 'attaching' | 'attached';
+export type AttachState = 'detached' | 'attaching' | 'attached';
 
 export interface RobloxProcess {
   pid: number;
-  name: string;
+  label: string;
+  name?: string;
 }
 
 interface AttachStore {
@@ -16,7 +16,7 @@ interface AttachStore {
 }
 
 let store: AttachStore = {
-  state: 'attached',
+  state: 'detached',
   dmaMode: false,
   selectedPids: [],
   processes: [],
@@ -70,13 +70,22 @@ export function deselectAllPids(): void {
 
 export async function refreshProcesses(): Promise<void> {
   try {
-    const processes = await invoke<RobloxProcess[]>('get_roblox_processes');
+    const rawProcesses = await invoke<RobloxProcess[]>('get_clients_list');
+    const processes = rawProcesses.map((process) => ({
+      ...process,
+      name: process.name ?? process.label,
+    }));
     const validPids = new Set(processes.map((p) => p.pid));
     const selectedPids = store.selectedPids.filter((pid) => validPids.has(pid));
-    store = { ...store, processes, selectedPids };
+    store = {
+      ...store,
+      processes,
+      selectedPids,
+      state: processes.length > 0 ? 'attached' : store.state,
+    };
     notify();
   } catch {
-    store = { ...store, processes: [], selectedPids: [] };
+    store = { ...store, processes: [], selectedPids: [], state: 'detached' };
     notify();
   }
 }
@@ -94,40 +103,31 @@ export function startAttaching(): void {
 export async function setAttached(): Promise<void> {
   store = { ...store, state: 'attached', dmaMode: false };
   notify();
-
-  try {
-    await invoke('start_vscode_server');
-  } catch {}
 }
 
 export async function setDetached(): Promise<void> {
-  store = { ...store, state: 'detached', dmaMode: false };
+  store = { ...store, state: 'detached', dmaMode: false, selectedPids: [], processes: [] };
   notify();
-
-  try {
-    await invoke('stop_vscode_server');
-  } catch {}
 }
 
 export async function performAttach(invokeFunc: () => Promise<void>): Promise<void> {
   try {
-    if (store.state !== 'attached') {
-      startAttaching();
-      await invokeFunc();
-      await setAttached();
-    }
+    startAttaching();
+    await invokeFunc();
+    await setAttached();
+    await refreshProcesses();
   } catch {
     await setDetached();
   }
 }
 
-export async function executeScript(script: string): Promise<void> {
-  if (store.state !== 'attached') {
-    await setAttached();
-  }
+export async function injectRoblox(): Promise<void> {
+  await performAttach(async () => {
+    await invoke('attach_roblox');
+  });
+}
 
-  const pids = store.selectedPids.length > 0 ? store.selectedPids : undefined;
-  const clientSettings = getClientSettings();
-  const command = clientSettings.redirect_output ? 'execute_script_redirected' : 'execute_script';
-  await invoke(command, { script, pids });
+export async function executeScript(script: string): Promise<void> {
+  const pids = store.selectedPids.length > 0 ? store.selectedPids : [0];
+  await Promise.all(pids.map((pid) => invoke('execute_script', { pid, script })));
 }

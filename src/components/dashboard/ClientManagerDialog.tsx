@@ -1,7 +1,8 @@
 import { useState, useEffect, useSyncExternalStore, useRef } from 'react';
 import { colors } from '../../config/theme';
-import { X, Trash2, Users, Gamepad2, Loader2, AlertCircle, Play, Copy, Check } from 'lucide-react';
+import { X, Trash2, Users, Gamepad2, Loader2, AlertCircle, Play, Copy, Check, Syringe } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { injectRoblox } from '../../stores/attachStore';
 import {
   loadClientManager,
   getClientManager,
@@ -99,6 +100,18 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
       return;
     }
     setLaunchTarget({ type: 'game', game });
+  };
+
+  const handleInjectClick = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError('');
+    try {
+      await injectRoblox();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to inject');
+    }
+    setLoading(false);
   };
 
   const handleJoinUser = async () => {
@@ -398,6 +411,7 @@ export function ClientManagerDialog({ isOpen, onClose }: ClientManagerDialogProp
                         void removeGame(game.id);
                       }}
                       onLaunch={() => handlePlayClick(game)}
+                      onInject={handleInjectClick}
                     />
                   ))
                 )}
@@ -1020,7 +1034,7 @@ function AccountCard({ account, onRemove }: { account: RobloxAccount; onRemove: 
   );
 }
 
-function GameCard({ game, onRemove, onLaunch }: { game: RobloxGame; onRemove: () => void; onLaunch: () => void }) {
+function GameCard({ game, onRemove, onLaunch, onInject }: { game: RobloxGame; onRemove: () => void; onLaunch: () => void; onInject: () => void }) {
   const [hovered, setHovered] = useState(false);
 
   return (
@@ -1090,6 +1104,7 @@ function GameCard({ game, onRemove, onLaunch }: { game: RobloxGame; onRemove: ()
 
       <div style={{ display: 'flex', gap: 4 }}>
         <PlayButton onClick={onLaunch} visible={hovered} />
+        <InjectButton onClick={onInject} visible={hovered} />
         <div style={{
           opacity: hovered ? 1 : 0,
           transition: 'opacity 0.15s ease',
@@ -1102,6 +1117,38 @@ function GameCard({ game, onRemove, onLaunch }: { game: RobloxGame; onRemove: ()
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+function InjectButton({ onClick, visible }: { onClick: () => void; visible: boolean }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        height: 28,
+        paddingLeft: 8,
+        paddingRight: 10,
+        borderRadius: 7,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 5,
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        background: hovered ? 'rgba(96,165,250,0.18)' : 'rgba(96,165,250,0.1)',
+        opacity: visible ? 1 : 0,
+        fontSize: 12,
+        fontWeight: 600,
+        color: '#60A5FA',
+      }}
+    >
+      <Syringe size={11} />
+      Inject
     </div>
   );
 }
