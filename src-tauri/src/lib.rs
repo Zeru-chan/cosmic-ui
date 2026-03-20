@@ -1,115 +1,110 @@
-mod vscode_bridge;
-mod explorer_bridge;
-mod dma_bridge;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod console_bridge;
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::windows::process::CommandExt;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
-use serde::Deserialize;
-use tauri::{AppHandle, Listener, Manager, State};
-use vscode_bridge::VsCodeBridge;
-use explorer_bridge::ExplorerBridge;
-use dma_bridge::DmaBridge;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{Emitter, Manager};
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio_tungstenite::tungstenite::Message;
+
 use console_bridge::{ConsoleBridge, CONSOLE_PORT};
 
-#[cfg(target_os = "windows")]
-fn disable_webview_shortcuts(window: &tauri::WebviewWindow) {
-    let _ = window.with_webview(|webview| unsafe {
-        let core = webview.controller().CoreWebView2().unwrap();
-        let settings = core.Settings().unwrap();
-        settings.SetAreDevToolsEnabled(false.into()).unwrap();
-        settings.SetAreDefaultContextMenusEnabled(false.into()).unwrap();
-        settings.SetIsStatusBarEnabled(false.into()).unwrap();
-    });
+#[derive(Serialize, Deserialize, Clone)]
+struct ScriptEntry {
+    name: String,
+    path: String,
 }
 
-const APP_VERSION: &str = "1.0.0";
-const VERSION_URL: &str = "https://hosting-sepia-nine.vercel.app/version";
-
-#[derive(Deserialize)]
-struct VersionInfo {
-    version: String,
-    download_url: String,
+#[derive(Serialize, Clone)]
+struct ClientInfo {
+    pid: i32,
+    label: String,
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LicenseAuthResponse {
-    token: String,
-    license_key: String,
-    display_name: String,
-    expires_at: Option<String>,
+#[derive(Serialize, Clone)]
+struct AttachResult {
+    pid: i32,
+    ok: bool,
+    msg: String,
+    label: String,
 }
 
-struct LspProcess {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+#[derive(Serialize, Clone)]
+struct OutputEvent {
+    pid: i32,
+    status: i32,
+    msg: String,
 }
 
-struct LspState {
-    process: Mutex<Option<LspProcess>>,
-}
-
-struct VsCodeState {
-    bridge: VsCodeBridge,
-}
-
-struct ExplorerState {
-    bridge: ExplorerBridge,
-}
-
-struct DmaState {
-    bridge: DmaBridge,
+#[derive(Serialize, Clone)]
+struct FileContent {
+    path: String,
+    content: String,
 }
 
 struct ConsoleState {
     bridge: ConsoleBridge,
 }
 
-fn get_synapse_settings_path() -> Result<std::path::PathBuf, String> {
+struct AppState {
+    clients: Arc<RwLock<HashMap<i32, mpsc::UnboundedSender<String>>>>,
+    usernames: Arc<RwLock<HashMap<i32, String>>>,
+    auto_inject: Arc<std::sync::atomic::AtomicBool>,
+    injecting: Arc<Mutex<bool>>,
+    injected_pids: Arc<RwLock<HashSet<i32>>>,
+    credentials: Arc<RwLock<Option<(String, String)>>>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        let creds = read_saved_credentials();
+        Self {
+            clients: Arc::new(RwLock::new(HashMap::new())),
+            usernames: Arc::new(RwLock::new(HashMap::new())),
+            auto_inject: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            injecting: Arc::new(Mutex::new(false)),
+            injected_pids: Arc::new(RwLock::new(HashSet::new())),
+            credentials: Arc::new(RwLock::new(creds)),
+        }
+    }
+}
+
+fn cosmic_dir() -> PathBuf {
+    PathBuf::from(r"C:\Cosmic")
+}
+
+fn scripts_dir() -> PathBuf {
+    std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("workspace")
+}
+
+fn settings_path() -> PathBuf {
+    cosmic_dir().join("ui_settings.json")
+}
+
+fn credentials_path() -> PathBuf {
+    cosmic_dir().join("Credentials.dat")
+}
+
+fn get_synapse_settings_path() -> Result<PathBuf, String> {
     let local_app_data = std::env::var("LOCALAPPDATA")
         .map_err(|_| "Failed to get LOCALAPPDATA environment variable".to_string())?;
-    Ok(std::path::Path::new(&local_app_data)
+    Ok(PathBuf::from(local_app_data)
         .join("Synapse Z")
         .join("bin")
         .join("settings.syn"))
-}
-
-#[tauri::command]
-fn load_client_settings_syn() -> Result<serde_json::Value, String> {
-    let path = get_synapse_settings_path()?;
-
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
-    }
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read settings.syn: {}", e))?;
-
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse settings.syn: {}", e))
-}
-
-#[tauri::command]
-fn save_client_settings_syn(settings: serde_json::Value) -> Result<bool, String> {
-    let path = get_synapse_settings_path()?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create settings folder: {}", e))?;
-    }
-
-    let serialized = serde_json::to_string(&settings)
-        .map_err(|e| format!("Failed to serialize settings.syn: {}", e))?;
-
-    std::fs::write(&path, serialized)
-        .map_err(|e| format!("Failed to write settings.syn: {}", e))?;
-
-    Ok(true)
 }
 
 fn get_console_wrapper(script: &str) -> String {
@@ -188,178 +183,389 @@ end"#,
     )
 }
 
-fn get_sidecar_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+fn write_credentials(username: &str, password: &str) -> bool {
+    let dir = cosmic_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let content = format!(
+        "{{\n  \"username\": \"{}\",\n  \"password\": \"{}\"\n}}",
+        username.replace('\\', "\\\\").replace('"', "\\\""),
+        password.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    std::fs::write(credentials_path(), content).is_ok()
+}
 
-    let binary_name = "binaries/luau-lsp-x86_64-pc-windows-msvc.exe";
-    let path = resource_path.join(binary_name);
+fn read_saved_credentials() -> Option<(String, String)> {
+    let content = std::fs::read_to_string(credentials_path()).ok()?;
+    let v: Value = serde_json::from_str(&content).ok()?;
+    let user = v["username"].as_str()?.to_string();
+    let pass = v["password"].as_str()?.to_string();
+    if user.is_empty() {
+        return None;
+    }
+    Some((user, pass))
+}
+
+fn get_roblox_pids() -> Vec<u32> {
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.processes()
+        .iter()
+        .filter(|(_, p)| {
+            let n = p.name().to_string_lossy().to_lowercase();
+            n == "robloxplayerbeta.exe" || n == "windows10universal.exe"
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect()
+}
+
+fn get_process_uptime_secs(pid: u32) -> u64 {
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let spid = sysinfo::Pid::from_u32(pid);
+    if let Some(proc_) = sys.process(spid) {
+        let start = proc_.start_time();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        return now.saturating_sub(start);
+    }
+    u64::MAX
+}
+
+fn ensure_resources_extracted(_app_handle: &tauri::AppHandle) {
+    let _ = std::fs::create_dir_all(cosmic_dir());
+}
+
+fn run_injector(app_handle: &tauri::AppHandle, pid: u32) -> i32 {
+    ensure_resources_extracted(app_handle);
+    let dir = cosmic_dir();
+    let exe = dir.join("Cosmic-Injector.exe");
+    if !exe.exists() {
+        return -2;
+    }
+    let dll = dir.join("Cosmic-Module.dll");
+    if !dll.exists() {
+        return -2;
+    }
+    match std::process::Command::new(&exe)
+        .arg(pid.to_string())
+        .current_dir(&dir)
+        .output()
+    {
+        Ok(o) => o.status.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+fn attach_msg(code: i32) -> &'static str {
+    match code {
+        6 => "Success",
+        -2 => "Injector or module not found",
+        -1 => "Initialization failure",
+        0 => "Failed to open Roblox process",
+        1 => "Roblox version mismatch",
+        2 => "Module DLL not found or corrupt",
+        3 => "Memory operation failed",
+        4 => "PDB download failed",
+        5 => "Injection timeout",
+        _ => "Unknown error",
+    }
+}
+
+async fn fetch_username(user_id: i64) -> Option<String> {
+    let url = format!("https://users.roblox.com/v1/users/{}", user_id);
+    let resp = reqwest::get(&url).await.ok()?;
+    let json: Value = resp.json().await.ok()?;
+    json["name"].as_str().map(|s| s.to_string())
+}
+
+async fn get_label(state: &AppState, pid: i32) -> String {
+    state
+        .usernames
+        .read()
+        .await
+        .get(&pid)
+        .cloned()
+        .unwrap_or_else(|| format!("PID {}", pid))
+}
+
+fn build_script_list() -> Vec<ScriptEntry> {
+    let dir = scripts_dir();
+    if !dir.exists() {
+        return vec![];
+    }
+    let valid = ["lua", "luau", "txt"];
+    let mut list: Vec<ScriptEntry> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let p = e.path();
+                if !p.is_file() {
+                    return false;
+                }
+                p.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| valid.contains(&ext.to_lowercase().as_str()))
+                    .unwrap_or(false)
+            })
+            .map(|e| {
+                let p = e.path();
+                ScriptEntry {
+                    name: p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    path: p.to_string_lossy().to_string(),
+                }
+            })
+            .collect(),
+        Err(_) => vec![],
+    };
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
+}
+
+async fn broadcast(state: &AppState, msg: &str) {
+    let clients = state.clients.read().await;
+    for tx in clients.values() {
+        let _ = tx.send(msg.to_string());
+    }
+}
+
+async fn send_to(state: &AppState, pid: i32, msg: &str) {
+    if let Some(tx) = state.clients.read().await.get(&pid) {
+        let _ = tx.send(msg.to_string());
+    }
+}
+
+async fn emit_clients(ah: &tauri::AppHandle, state: &AppState) {
+    let clients = state.clients.read().await;
+    let usernames = state.usernames.read().await;
+    let list: Vec<ClientInfo> = clients
+        .keys()
+        .map(|&pid| ClientInfo {
+            pid,
+            label: usernames
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| format!("PID {}", pid)),
+        })
+        .collect();
+    let _ = ah.emit("clients", list);
+}
+
+async fn on_ws_message(ah: &tauri::AppHandle, state: &AppState, pid: i32, text: &str) {
+    let v: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if v.get("Message").is_some() {
+        let status = v["Status"].as_i64().unwrap_or(0) as i32;
+        let msg = v["Message"].as_str().unwrap_or("").to_string();
+        let _ = ah.emit("output", OutputEvent { pid, status, msg });
+        return;
+    }
+    if let Some(uid) = v.get("UserId").and_then(|u| u.as_i64()) {
+        let game_id = v["GameId"].as_i64().unwrap_or(0);
+        if let Some(name) = fetch_username(uid).await {
+            state.usernames.write().await.insert(pid, name.clone());
+            let _ = ah.emit(
+                "user_info",
+                serde_json::json!({"pid": pid, "label": name, "userId": uid, "gameId": game_id}),
+            );
+            emit_clients(ah, state).await;
+        }
+    }
+}
+
+async fn handle_ws_connection(
+    stream: tokio::net::TcpStream,
+    ah: tauri::AppHandle,
+    state: Arc<AppState>,
+) {
+    use std::sync::Mutex as StdMutex;
+    let pid_store: Arc<StdMutex<i32>> = Arc::new(StdMutex::new(-1));
+    let pid_clone = pid_store.clone();
+    let ws = match tokio_tungstenite::accept_hdr_async(
+        stream,
+        |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+         res: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            if let Some(v) = req.headers().get("process-id") {
+                if let Ok(s) = v.to_str() {
+                    if let Ok(p) = s.parse::<i32>() {
+                        *pid_clone.lock().unwrap() = p;
+                    }
+                }
+            }
+            Ok(res)
+        },
+    )
+    .await
+    {
+        Ok(ws) => ws,
+        Err(_) => return,
+    };
+    let pid = *pid_store.lock().unwrap();
+    if pid < 0 {
+        return;
+    }
+    let (mut sink, mut stream) = ws.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    state.clients.write().await.insert(pid, tx);
+    let label = get_label(&state, pid).await;
+    let _ = ah.emit("client_connected", ClientInfo { pid, label });
+    emit_clients(&ah, &state).await;
+    let write_handle = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if sink.send(Message::Text(msg)).await.is_err() {
+                break;
+            }
+        }
+    });
+    while let Some(Ok(msg)) = stream.next().await {
+        if let Message::Text(text) = msg {
+            on_ws_message(&ah, &state, pid, &text).await;
+        }
+    }
+    write_handle.abort();
+    state.clients.write().await.remove(&pid);
+    state.usernames.write().await.remove(&pid);
+    state.injected_pids.write().await.remove(&pid);
+    let _ = ah.emit("client_disconnected", pid);
+    emit_clients(&ah, &state).await;
+}
+
+async fn run_ws_server(ah: tauri::AppHandle, state: Arc<AppState>) {
+    let listener = match TcpListener::bind("127.0.0.1:24950").await {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    loop {
+        if let Ok((stream, _)) = listener.accept().await {
+            tauri::async_runtime::spawn(handle_ws_connection(stream, ah.clone(), state.clone()));
+        }
+    }
+}
+
+async fn do_inject(ah: &tauri::AppHandle, state: &AppState, pids: &[u32]) {
+    {
+        let mut inj = state.injecting.lock().await;
+        if *inj {
+            return;
+        }
+        *inj = true;
+    }
+    if let Some((user, pass)) = state.credentials.read().await.clone() {
+        write_credentials(&user, &pass);
+    }
+    let _ = ah.emit("inject_start", ());
+    for &pid in pids {
+        let ah_clone = ah.clone();
+        let code = tokio::task::spawn_blocking(move || run_injector(&ah_clone, pid))
+            .await
+            .unwrap_or(-1);
+        let ok = code == 6;
+        if ok {
+            state.injected_pids.write().await.insert(pid as i32);
+        } else {
+            state.injected_pids.write().await.remove(&(pid as i32));
+        }
+        let label = get_label(state, pid as i32).await;
+        let _ = ah.emit(
+            "attach_result",
+            AttachResult {
+                pid: pid as i32,
+                ok,
+                msg: attach_msg(code).to_string(),
+                label,
+            },
+        );
+    }
+    emit_clients(ah, state).await;
+    *state.injecting.lock().await = false;
+    let _ = ah.emit("inject_end", ());
+}
+
+async fn auto_inject_tick(ah: &tauri::AppHandle, state: &AppState) {
+    if state.credentials.read().await.is_none() {
+        return;
+    }
+    let all_pids = get_roblox_pids();
+    {
+        let mut inj = state.injected_pids.write().await;
+        inj.retain(|&p| all_pids.contains(&(p as u32)));
+    }
+    let already: HashSet<i32> = state.injected_pids.read().await.clone();
+    let ready: Vec<u32> = all_pids
+        .iter()
+        .filter(|&&p| !already.contains(&(p as i32)))
+        .copied()
+        .filter(|&p| get_process_uptime_secs(p) >= 8)
+        .collect();
+    if ready.is_empty() {
+        return;
+    }
+    for &p in &ready {
+        state.injected_pids.write().await.insert(p as i32);
+    }
+    do_inject(ah, state, &ready).await;
+}
+
+async fn run_auto_inject_loop(ah: tauri::AppHandle, state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        interval.tick().await;
+        if !state.auto_inject.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+        if *state.injecting.lock().await {
+            continue;
+        }
+        auto_inject_tick(&ah, &state).await;
+    }
+}
+
+fn start_file_watcher(_ah: tauri::AppHandle) {}
+
+fn extract_resources_setup(_app: &tauri::App) {
+    let _ = std::fs::create_dir_all(cosmic_dir());
+}
+
+#[tauri::command]
+fn load_client_settings_syn() -> Result<Value, String> {
+    let path = get_synapse_settings_path()?;
 
     if !path.exists() {
-        let dev_path = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current dir: {}", e))?
-            .join("src-tauri")
-            .join(binary_name);
-
-        if dev_path.exists() {
-            return Ok(dev_path);
-        }
-
-        return Err(format!("LSP binary not found at {:?} or {:?}", path, dev_path));
+        return Ok(serde_json::json!({}));
     }
 
-    Ok(path)
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read settings.syn: {}", e))?;
+
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse settings.syn: {}", e))
 }
 
 #[tauri::command]
-async fn start_lsp(app: AppHandle, state: State<'_, LspState>) -> Result<bool, String> {
-    let mut process_guard = state.process.lock().map_err(|e| e.to_string())?;
+fn save_client_settings_syn(settings: Value) -> Result<bool, String> {
+    let path = get_synapse_settings_path()?;
 
-    if process_guard.is_some() {
-        return Ok(true);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create settings folder: {}", e))?;
     }
 
-    let lsp_path = get_sidecar_path(&app)?;
+    let serialized = serde_json::to_string(&settings)
+        .map_err(|e| format!("Failed to serialize settings.syn: {}", e))?;
 
-    let mut child = Command::new(&lsp_path)
-        .arg("lsp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn LSP: {}", e))?;
-
-    let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
-    let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
-
-    *process_guard = Some(LspProcess {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout),
-    });
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("Failed to write settings.syn: {}", e))?;
 
     Ok(true)
-}
-
-#[tauri::command]
-async fn stop_lsp(state: State<'_, LspState>) -> Result<bool, String> {
-    let mut process_guard = state.process.lock().map_err(|e| e.to_string())?;
-
-    if let Some(mut lsp) = process_guard.take() {
-        let _ = lsp.child.kill();
-    }
-
-    Ok(true)
-}
-
-#[tauri::command]
-async fn send_lsp_message(state: State<'_, LspState>, message: String) -> Result<String, String> {
-    let mut process_guard = state.process.lock().map_err(|e| e.to_string())?;
-
-    let lsp = process_guard
-        .as_mut()
-        .ok_or("LSP not started")?;
-
-    let content_length = message.len();
-    let header = format!("Content-Length: {}\r\n\r\n", content_length);
-
-    lsp.stdin
-        .write_all(header.as_bytes())
-        .map_err(|e| format!("Failed to write header: {}", e))?;
-    lsp.stdin
-        .write_all(message.as_bytes())
-        .map_err(|e| format!("Failed to write message: {}", e))?;
-    lsp.stdin
-        .flush()
-        .map_err(|e| format!("Failed to flush: {}", e))?;
-
-    let mut headers = HashMap::new();
-    loop {
-        let mut line = String::new();
-        lsp.stdout
-            .read_line(&mut line)
-            .map_err(|e| format!("Failed to read header line: {}", e))?;
-
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-
-        if let Some((key, value)) = line.split_once(':') {
-            headers.insert(key.trim().to_lowercase(), value.trim().to_string());
-        }
-    }
-
-    let content_length: usize = headers
-        .get("content-length")
-        .ok_or("Missing Content-Length header")?
-        .parse()
-        .map_err(|e| format!("Invalid Content-Length: {}", e))?;
-
-    let mut content = vec![0u8; content_length];
-    lsp.stdout
-        .read_exact(&mut content)
-        .map_err(|e| format!("Failed to read content: {}", e))?;
-
-    String::from_utf8(content).map_err(|e| format!("Invalid UTF-8 response: {}", e))
-}
-
-#[tauri::command]
-fn lsp_available(app: AppHandle) -> bool {
-    get_sidecar_path(&app).is_ok()
-}
-
-#[tauri::command]
-async fn execute_script(script: String, pids: Option<Vec<u32>>) -> Result<bool, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA environment variable")?;
-
-    let scheduler_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("bin")
-        .join("scheduler");
-
-    if !scheduler_dir.exists() {
-        return Err("Scheduler folder not found. Is Synapse Z installed?".to_string());
-    }
-
-    let content = format!("{}@@FileFullyWritten@@", script);
-
-    let target_pids = pids.unwrap_or_else(|| vec![0]);
-
-    for pid in target_pids {
-        let random_name: String = (0..10)
-            .map(|_| {
-                let idx = rand::random::<usize>() % 62;
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[idx] as char
-            })
-            .collect();
-
-        let file_name = if pid == 0 {
-            format!("{}.lua", random_name)
-        } else {
-            format!("PID{}_{}.lua", pid, random_name)
-        };
-
-        let file_path = scheduler_dir.join(file_name);
-        std::fs::write(&file_path, &content)
-            .map_err(|e| format!("Failed to write script to scheduler: {}", e))?;
-    }
-
-    Ok(true)
-}
-
-#[tauri::command]
-async fn execute_script_redirected(
-    app: AppHandle,
-    state: State<'_, ConsoleState>,
-    script: String,
-    pids: Option<Vec<u32>>,
-) -> Result<bool, String> {
-    state.bridge.start(app).await?;
-    execute_script(get_console_wrapper(&script), pids).await
 }
 
 #[tauri::command]
@@ -368,1275 +574,338 @@ fn get_console_port() -> u16 {
 }
 
 #[tauri::command]
-async fn handle_attach(_injector_path: Option<String>) -> Result<bool, String> {
-    Ok(true)
-}
-
-#[tauri::command]
-fn is_roblox_running() -> bool {
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    sys.processes().values().any(|p| {
-        let name = p.name().to_string_lossy().to_lowercase();
-        name == "robloxplayerbeta.exe" || name == "windows10universal.exe"
-    })
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RobloxProcess {
-    pid: u32,
-    name: String,
-}
-
-#[tauri::command]
-fn get_roblox_processes() -> Vec<RobloxProcess> {
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    sys.processes()
-        .iter()
-        .filter_map(|(pid, process)| {
-            let name = process.name().to_string_lossy().to_lowercase();
-            if name == "robloxplayerbeta.exe" || name == "windows10universal.exe" {
-                Some(RobloxProcess {
-                    pid: pid.as_u32(),
-                    name: format!("Roblox (PID {})", pid.as_u32()),
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-#[tauri::command]
-async fn reset_hwid() -> Result<String, String> {
-    let account_key = read_account_key()?;
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://z-api.synapse.do/resethwid")
-        .header("key", &account_key)
-        .header("USER-AGENT", "SYNZ-SERVICE")
-        .send()
-        .await
-        .map_err(|e| format!("HWID reset request failed: {}", e))?;
-
-    match response.status().as_u16() {
-        418 => Ok("HWID reset successful".to_string()),
-        429 => Err("Reset on cooldown. Try again later.".to_string()),
-        403 => Err("Account is blacklisted.".to_string()),
-        status => Err(format!("HWID reset failed: HTTP {}", status)),
-    }
-}
-
-#[tauri::command]
-async fn get_account_info() -> Result<AccountInfo, String> {
-    let account_key = read_account_key()?;
-    let expires_at = fetch_license_expiry(&account_key).await.ok().flatten();
-
-    Ok(AccountInfo {
-        key: account_key,
-        expires_at,
-    })
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AccountInfo {
-    key: String,
-    expires_at: Option<String>,
-}
-
-#[tauri::command]
-fn logout_account() -> Result<bool, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-    let account_key_path = std::path::Path::new(&local_app_data).join("auth_v2.syn");
-    if account_key_path.exists() {
-        std::fs::remove_file(&account_key_path)
-            .map_err(|e| format!("Failed to remove account key: {}", e))?;
-    }
-    Ok(true)
-}
-
-fn read_account_key() -> Result<String, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let account_key_path = std::path::Path::new(&local_app_data).join("auth_v2.syn");
-    let key = std::fs::read_to_string(account_key_path)
-        .map_err(|_| "Could not find local license account key")?;
-
-    let trimmed = key.trim().to_string();
-    if trimmed.is_empty() {
-        return Err("Local license account key is empty".to_string());
+async fn execute_script_redirected(
+    app: tauri::AppHandle,
+    console_state: tauri::State<'_, ConsoleState>,
+    app_state: tauri::State<'_, Arc<AppState>>,
+    pid: i32,
+    script: String,
+) -> Result<(), String> {
+    if script.trim().is_empty() {
+        return Ok(());
     }
 
-    Ok(trimmed)
-}
+    console_state.bridge.start(app).await?;
+    let wrapped = get_console_wrapper(&script);
 
-async fn fetch_license_expiry(account_key: &str) -> Result<Option<String>, String> {
-    let client = reqwest::Client::new();
-    let response = client
-        .get("https://z-api.synapse.do/info")
-        .header("key", account_key)
-        .header("USER-AGENT", "SYNZ-SERVICE")
-        .send()
-        .await
-        .map_err(|e| format!("License info request failed: {}", e))?;
-
-    if response.status().as_u16() != 418 {
-        return Err(format!("License info request failed: HTTP {}", response.status()));
-    }
-
-    let text = response.text()
-        .await
-        .map_err(|e| format!("Failed to read license info response: {}", e))?;
-
-    let unix_seconds = text.trim().parse::<i64>()
-        .map_err(|e| format!("Invalid license expiry timestamp: {}", e))?;
-    let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_seconds, 0)
-        .ok_or("Invalid expiry date returned by license API")?;
-
-    Ok(Some(expires_at.to_rfc3339()))
-}
-
-#[tauri::command]
-async fn redeem_license(license: String) -> Result<LicenseAuthResponse, String> {
-    let trimmed_license = license.trim().to_string();
-    if trimmed_license.is_empty() {
-        return Err("License key is required".to_string());
-    }
-
-    let account_key = read_account_key()?;
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://z-api.synapse.do/redeem")
-        .header("key", &account_key)
-        .header("USER-AGENT", "SYNZ-SERVICE")
-        .header("license", &trimmed_license)
-        .send()
-        .await
-        .map_err(|e| format!("License redemption failed: {}", e))?;
-
-    match response.status().as_u16() {
-        418 => {
-            let body = response.text()
-                .await
-                .map_err(|e| format!("Failed to read license redemption response: {}", e))?;
-            if !body.starts_with("Added") {
-                return Err("Invalid license key".to_string());
-            }
-        }
-        403 => return Err("Invalid license key".to_string()),
-        status => return Err(format!("License redemption failed: HTTP {}", status)),
-    }
-
-    let expires_at = fetch_license_expiry(&account_key).await.ok().flatten();
-
-    Ok(LicenseAuthResponse {
-        token: trimmed_license.clone(),
-        license_key: trimmed_license,
-        display_name: "Licensed User".to_string(),
-        expires_at,
-    })
-}
-
-#[tauri::command]
-async fn validate_license_session(_license: Option<String>) -> Result<bool, String> {
-    let account_key = match read_account_key() {
-        Ok(key) => key,
-        Err(_) => return Ok(false),
-    };
-
-    Ok(fetch_license_expiry(&account_key).await.is_ok())
-}
-
-#[tauri::command]
-fn toggle_protection(protection_type: String, enabled: bool) -> Result<bool, String> {
-    if enabled {
-        println!("active");
-    }
-    println!("[Protection] {} = {}", protection_type, enabled);
-    Ok(enabled)
-}
-
-#[tauri::command]
-async fn start_vscode_server(state: State<'_, VsCodeState>) -> Result<bool, String> {
-    state.bridge.start().await?;
-    Ok(true)
-}
-
-#[tauri::command]
-async fn stop_vscode_server(state: State<'_, VsCodeState>) -> Result<bool, String> {
-    state.bridge.stop().await;
-    Ok(true)
-}
-
-#[tauri::command]
-async fn is_vscode_server_running(state: State<'_, VsCodeState>) -> Result<bool, String> {
-    Ok(state.bridge.is_running().await)
-}
-
-fn check_version_and_update() -> Result<(), String> {
-    let response = reqwest::blocking::get(VERSION_URL)
-        .map_err(|e| format!("Failed to fetch version: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Version check failed: HTTP {}", response.status()));
-    }
-
-    let version_info: VersionInfo = response.json()
-        .map_err(|e| format!("Failed to parse version info: {}", e))?;
-
-    if version_info.version != APP_VERSION {
-        let current_exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe path: {}", e))?;
-
-        let exe_dir = current_exe.parent()
-            .ok_or("Failed to get exe directory")?;
-
-        let exe_name = current_exe.file_name()
-            .ok_or("Failed to get exe name")?
-            .to_string_lossy();
-
-        let new_exe_path = exe_dir.join(format!("{}.new", exe_name));
-        let batch_path = exe_dir.join("_update.bat");
-
-        let download_response = reqwest::blocking::get(&version_info.download_url)
-            .map_err(|e| format!("Failed to download update: {}", e))?;
-
-        if !download_response.status().is_success() {
-            return Err(format!("Download failed: HTTP {}", download_response.status()));
-        }
-
-        let bytes = download_response.bytes()
-            .map_err(|e| format!("Failed to read update: {}", e))?;
-
-        std::fs::write(&new_exe_path, &bytes)
-            .map_err(|e| format!("Failed to save update: {}", e))?;
-
-        let batch_content = format!(
-            "@echo off\r\ntimeout /t 1 /nobreak >nul\r\ndel \"{}\"\r\nmove \"{}\" \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
-            current_exe.display(),
-            new_exe_path.display(),
-            current_exe.display(),
-            current_exe.display()
-        );
-
-        std::fs::write(&batch_path, &batch_content)
-            .map_err(|e| format!("Failed to write update script: {}", e))?;
-
-        Command::new("cmd")
-            .args(["/C", &batch_path.to_string_lossy()])
-            .creation_flags(0x08000000)
-            .spawn()
-            .map_err(|e| format!("Failed to launch update script: {}", e))?;
-
-        std::process::exit(0);
+    if pid > 0 {
+        send_to(&app_state, pid, &wrapped).await;
+    } else {
+        broadcast(&app_state, &wrapped).await;
     }
 
     Ok(())
 }
 
 #[tauri::command]
-fn get_app_version() -> String {
-    APP_VERSION.to_string()
+async fn set_credentials(
+    state: tauri::State<'_, Arc<AppState>>,
+    username: String,
+    password: String,
+) -> Result<bool, ()> {
+    if username.is_empty() {
+        let _ = std::fs::remove_file(credentials_path());
+        *state.credentials.write().await = None;
+        return Ok(true);
+    }
+    let ok = write_credentials(&username, &password);
+    if ok {
+        *state.credentials.write().await = Some((username, password));
+    }
+    Ok(ok)
 }
 
 #[tauri::command]
-async fn install_vscode_extension() -> Result<bool, String> {
-    let url = "https://raw.githubusercontent.com/orev7s/vault/main/pearl-executor-1.0.0.vsix";
-
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let pearl_dir = std::path::Path::new(&local_app_data).join("Synapse Z");
-    if !pearl_dir.exists() {
-        std::fs::create_dir_all(&pearl_dir)
-            .map_err(|e| format!("Failed to create Synapse Z directory: {}", e))?;
+async fn get_saved_credentials() -> Result<Value, ()> {
+    match read_saved_credentials() {
+        Some((user, _)) => Ok(serde_json::json!({ "username": user, "hasCredentials": true })),
+        None => Ok(serde_json::json!({ "username": "", "hasCredentials": false })),
     }
+}
 
-    let vsix_path = pearl_dir.join("pearl-executor.vsix");
-
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| format!("Failed to download extension: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Failed to download extension: HTTP {}", response.status()));
+#[tauri::command]
+async fn execute_script(
+    state: tauri::State<'_, Arc<AppState>>,
+    pid: i32,
+    script: String,
+) -> Result<(), ()> {
+    if script.trim().is_empty() {
+        return Ok(());
     }
+    if pid > 0 {
+        send_to(&state, pid, &script).await;
+    } else {
+        broadcast(&state, &script).await;
+    }
+    Ok(())
+}
 
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| format!("Failed to read extension: {}", e))?;
+#[tauri::command]
+async fn kill_client(
+    ah: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    pid: i32,
+) -> Result<(), ()> {
+    state.clients.write().await.remove(&pid);
+    state.usernames.write().await.remove(&pid);
+    state.injected_pids.write().await.remove(&pid);
+    let _ = ah.emit("client_disconnected", pid);
+    emit_clients(&ah, &state).await;
 
-    std::fs::write(&vsix_path, &bytes)
-        .map_err(|e| format!("Failed to save extension: {}", e))?;
-
-    let code_path = find_vscode_cli()?;
-
-    let output = Command::new(&code_path)
-        .args(["--install-extension", &vsix_path.to_string_lossy()])
-        .creation_flags(0x08000000)
-        .output();
-
-    match output {
-        Ok(result) => {
-            if result.status.success() {
-                let _ = Command::new(&code_path)
-                    .creation_flags(0x08000000)
-                    .spawn();
-                Ok(true)
-            } else {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                Err(format!("Installation failed: {}", stderr))
+    if pid > 0 {
+        tokio::task::spawn_blocking(move || {
+            use sysinfo::{ProcessesToUpdate, System};
+            let mut sys = System::new_all();
+            sys.refresh_processes(ProcessesToUpdate::All, true);
+            let spid = sysinfo::Pid::from_u32(pid as u32);
+            if let Some(proc_) = sys.process(spid) {
+                let _ = proc_.kill();
             }
-        }
-        Err(e) => {
-            Err(format!("Failed to run VS Code CLI: {}", e))
-        }
-    }
-}
-
-fn find_vscode_cli() -> Result<String, String> {
-    if let Ok(output) = Command::new("code").arg("--version").creation_flags(0x08000000).output() {
-        if output.status.success() {
-            return Ok("code".to_string());
-        }
-    }
-
-    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let program_files = std::env::var("PROGRAMFILES").unwrap_or_default();
-    let program_files_x86 = std::env::var("PROGRAMFILES(X86)").unwrap_or_default();
-    let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
-
-    let possible_paths = [
-        format!("{}\\Programs\\Microsoft VS Code\\bin\\code.cmd", local_app_data),
-        format!("{}\\Programs\\Microsoft VS Code\\Code.exe", local_app_data),
-        format!("{}\\Microsoft VS Code\\bin\\code.cmd", program_files),
-        format!("{}\\Microsoft VS Code\\Code.exe", program_files),
-        format!("{}\\Microsoft VS Code\\bin\\code.cmd", program_files_x86),
-        format!("{}\\Microsoft VS Code\\Code.exe", program_files_x86),
-        format!("{}\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd", user_profile),
-        format!("{}\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe", user_profile),
-    ];
-
-    for path in &possible_paths {
-        if std::path::Path::new(path).exists() {
-            return Ok(path.clone());
-        }
-    }
-
-    Err("VS Code is not installed. Please install VS Code first.".to_string())
-}
-
-#[tauri::command]
-async fn start_explorer_server(state: State<'_, ExplorerState>) -> Result<bool, String> {
-    state.bridge.start().await?;
-    Ok(true)
-}
-
-#[tauri::command]
-async fn stop_explorer_server(state: State<'_, ExplorerState>) -> Result<bool, String> {
-    state.bridge.stop().await;
-    Ok(true)
-}
-
-#[tauri::command]
-async fn is_explorer_connected(state: State<'_, ExplorerState>) -> Result<bool, String> {
-    Ok(state.bridge.is_connected().await)
-}
-
-#[tauri::command]
-async fn get_explorer_connection_info(state: State<'_, ExplorerState>) -> Result<Option<serde_json::Value>, String> {
-    Ok(state.bridge.get_connection_info().await)
-}
-
-#[tauri::command]
-async fn send_explorer_message(state: State<'_, ExplorerState>, message: String) -> Result<String, String> {
-    println!("[Explorer] send_message called: {}", &message[..message.len().min(100)]);
-
-    let mut rx = state.bridge.subscribe().await
-        .ok_or("Explorer not connected")?;
-
-    state.bridge.send_message(message.clone()).await?;
-
-    let parsed: serde_json::Value = serde_json::from_str(&message)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
-    let request_id = parsed.get("requestId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let timeout = tokio::time::Duration::from_secs(10);
-    let start = std::time::Instant::now();
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err("Request timeout".to_string());
-        }
-
-        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
-            Ok(Ok(response)) => {
-                println!("[Explorer] Got response: {}", &response[..response.len().min(100)]);
-
-                if let Some(ref req_id) = request_id {
-                    if let Ok(resp_parsed) = serde_json::from_str::<serde_json::Value>(&response) {
-                        let resp_req_id = resp_parsed.get("data")
-                            .and_then(|d| d.get("requestId"))
-                            .and_then(|v| v.as_str());
-
-                        if resp_req_id == Some(req_id.as_str()) {
-                            return Ok(response);
-                        }
-                    }
-                } else {
-                    return Ok(response);
-                }
-            }
-            Ok(Err(_)) => {
-                return Err("Channel closed".to_string());
-            }
-            Err(_) => {
-                continue;
-            }
-        }
-    }
-}
-
-#[tauri::command]
-fn get_explorer_port() -> u16 {
-    21574
-}
-
-#[tauri::command]
-async fn get_explorer_script() -> Result<String, String> {
-    let url = "https://raw.githubusercontent.com/orev7s/vault/refs/heads/main/ws-explorer.lua";
-
-    let response = reqwest::get(url)
+        })
         .await
-        .map_err(|e| format!("Failed to fetch explorer script: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Failed to fetch explorer script: HTTP {}", response.status()));
+        .ok();
     }
 
-    response.text()
-        .await
-        .map_err(|e| format!("Failed to read explorer script: {}", e))
+    Ok(())
 }
 
 #[tauri::command]
-async fn save_decompiled_script(name: String, content: String) -> Result<String, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let workspace_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("workspace");
-
-    if !workspace_dir.exists() {
-        std::fs::create_dir_all(&workspace_dir)
-            .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
-    }
-
-    let safe_name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    let file_name = if safe_name.ends_with(".lua") || safe_name.ends_with(".luau") {
+async fn save_to_workspace(name: String, content: String) -> Result<String, String> {
+    let dir = scripts_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let safe_name = name.trim().to_string();
+    let safe_name = if safe_name.is_empty() {
+        "script".to_string()
+    } else {
+        safe_name
+    };
+    let fname = if safe_name.ends_with(".lua") || safe_name.ends_with(".luau") {
         safe_name
     } else {
         format!("{}.lua", safe_name)
     };
-
-    let file_path = workspace_dir.join(&file_name);
-
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
-
-    Ok(file_path.to_string_lossy().to_string())
+    let path = dir.join(&fname);
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(fname)
 }
 
 #[tauri::command]
-async fn save_all_scripts(scripts: Vec<(String, String)>) -> Result<String, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let dump_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("workspace")
-        .join(format!("dump_{}", timestamp));
-
-    std::fs::create_dir_all(&dump_dir)
-        .map_err(|e| format!("Failed to create dump directory: {}", e))?;
-
-    let mut saved_count = 0;
-    for (path, content) in scripts {
-        let safe_path = path
-            .replace("game:GetService(\"", "")
-            .replace("\")", "")
-            .replace([':', '"', '<', '>', '|', '*', '?'], "_")
-            .replace('.', "/");
-
-        let file_path = dump_dir.join(format!("{}.lua", safe_path));
-
-        if let Some(parent) = file_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        if std::fs::write(&file_path, &content).is_ok() {
-            saved_count += 1;
-        }
+async fn attach_roblox(
+    ah: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), ()> {
+    let pids = get_roblox_pids();
+    if pids.is_empty() {
+        let _ = ah.emit(
+            "output",
+            OutputEvent {
+                pid: 0,
+                status: 2,
+                msg: "No Roblox processes found.".into(),
+            },
+        );
+        return Ok(());
     }
-
-    Ok(dump_dir.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-fn open_folder_in_explorer(path: String) -> Result<bool, String> {
-    Command::new("explorer")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("Failed to open folder: {}", e))?;
-
-    Ok(true)
-}
-
-#[tauri::command]
-fn get_workspace_path() -> Result<String, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let workspace_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("workspace");
-
-    if !workspace_dir.exists() {
-        std::fs::create_dir_all(&workspace_dir)
-            .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
-    }
-
-    Ok(workspace_dir.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-fn get_scripts_path() -> Result<String, String> {
-    Ok(get_scripts_dir_path()?.to_string_lossy().to_string())
-}
-
-fn get_scripts_dir_path() -> Result<std::path::PathBuf, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let scripts_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("scripts");
-
-    if !scripts_dir.exists() {
-        std::fs::create_dir_all(&scripts_dir)
-            .map_err(|e| format!("Failed to create scripts directory: {}", e))?;
-    }
-
-    Ok(scripts_dir)
-}
-
-fn resolve_scripts_relative_path(relative_path: &str) -> Result<std::path::PathBuf, String> {
-    let relative = std::path::Path::new(relative_path);
-
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::ParentDir
-                | std::path::Component::RootDir
-                | std::path::Component::Prefix(_)
-        )
-    }) {
-        return Err("Invalid scripts path".to_string());
-    }
-
-    Ok(get_scripts_dir_path()?.join(relative))
-}
-
-#[tauri::command]
-fn create_scripts_folder(relative_path: String) -> Result<bool, String> {
-    let folder_path = resolve_scripts_relative_path(&relative_path)?;
-
-    if folder_path.exists() {
-        return Err("Folder already exists".to_string());
-    }
-
-    std::fs::create_dir_all(&folder_path)
-        .map_err(|e| format!("Failed to create folder: {}", e))?;
-
-    Ok(true)
-}
-
-#[tauri::command]
-fn move_scripts_entry(from_relative_path: String, to_relative_path: String) -> Result<bool, String> {
-    let source_path = resolve_scripts_relative_path(&from_relative_path)?;
-    let target_path = resolve_scripts_relative_path(&to_relative_path)?;
-
-    if !source_path.exists() {
-        return Err("Source path does not exist".to_string());
-    }
-
-    if target_path.exists() {
-        return Err("Target path already exists".to_string());
-    }
-
-    if source_path.is_dir() && target_path.starts_with(&source_path) {
-        return Err("Cannot move a folder into itself".to_string());
-    }
-
-    if let Some(parent) = target_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to prepare target directory: {}", e))?;
-    }
-
-    std::fs::rename(&source_path, &target_path)
-        .map_err(|e| format!("Failed to move entry: {}", e))?;
-
-    Ok(true)
-}
-
-#[tauri::command]
-fn get_app_storage_path() -> Result<String, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let storage_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("state");
-
-    if !storage_dir.exists() {
-        std::fs::create_dir_all(&storage_dir)
-            .map_err(|e| format!("Failed to create app storage directory: {}", e))?;
-    }
-
-    Ok(storage_dir.to_string_lossy().to_string())
-}
-
-#[derive(serde::Serialize, Clone)]
-struct WorkspaceEntry {
-    name: String,
-    path: String,
-    is_dir: bool,
-    extension: Option<String>,
-}
-
-#[tauri::command]
-fn read_workspace_dir(dir_path: String) -> Result<Vec<WorkspaceEntry>, String> {
-    let path = std::path::Path::new(&dir_path);
-
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut entries: Vec<WorkspaceEntry> = vec![];
-
-    let read_dir = std::fs::read_dir(path)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
-
-    for entry in read_dir {
-        if let Ok(entry) = entry {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            let file_path = entry.path().to_string_lossy().to_string();
-            let is_dir = entry.path().is_dir();
-            let extension = if is_dir {
-                None
-            } else {
-                entry.path().extension().map(|e| e.to_string_lossy().to_string())
-            };
-
-            entries.push(WorkspaceEntry {
-                name: file_name,
-                path: file_path,
-                is_dir,
-                extension,
-            });
-        }
-    }
-
-    entries.sort_by(|a, b| {
-        if a.is_dir == b.is_dir {
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
-        } else if a.is_dir {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Greater
-        }
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        do_inject(&ah, &st, &pids).await;
     });
-
-    Ok(entries)
+    Ok(())
 }
 
 #[tauri::command]
-fn read_workspace_file(file_path: String) -> Result<String, String> {
-    std::fs::read_to_string(&file_path)
-        .map_err(|e| format!("Failed to read file: {}", e))
+async fn get_clients_list(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<ClientInfo>, ()> {
+    let clients = state.clients.read().await;
+    let usernames = state.usernames.read().await;
+    Ok(clients
+        .keys()
+        .map(|&pid| ClientInfo {
+            pid,
+            label: usernames
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| format!("PID {}", pid)),
+        })
+        .collect())
 }
 
 #[tauri::command]
-fn get_autoexec_path() -> Result<String, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let autoexec_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("autoexec");
-
-    if !autoexec_dir.exists() {
-        std::fs::create_dir_all(&autoexec_dir)
-            .map_err(|e| format!("Failed to create autoexec directory: {}", e))?;
-    }
-
-    Ok(autoexec_dir.to_string_lossy().to_string())
+async fn get_scripts_list() -> Result<Vec<ScriptEntry>, ()> {
+    Ok(build_script_list())
 }
 
 #[tauri::command]
-fn add_to_autoexec(script_name: String, content: String) -> Result<bool, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let autoexec_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("autoexec");
-
-    if !autoexec_dir.exists() {
-        std::fs::create_dir_all(&autoexec_dir)
-            .map_err(|e| format!("Failed to create autoexec directory: {}", e))?;
-    }
-
-    let file_path = autoexec_dir.join(&script_name);
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write autoexec script: {}", e))?;
-
-    Ok(true)
-}
-
-#[tauri::command]
-fn remove_from_autoexec(script_name: String) -> Result<bool, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let autoexec_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("autoexec");
-
-    let file_path = autoexec_dir.join(&script_name);
-
-    if file_path.exists() {
-        std::fs::remove_file(&file_path)
-            .map_err(|e| format!("Failed to remove autoexec script: {}", e))?;
-    }
-
-    Ok(true)
-}
-
-#[tauri::command]
-fn is_in_autoexec(script_name: String) -> Result<bool, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let autoexec_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("autoexec");
-
-    let file_path = autoexec_dir.join(&script_name);
-
-    Ok(file_path.exists())
-}
-
-#[tauri::command]
-fn get_autoexec_scripts() -> Result<Vec<String>, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let autoexec_dir = std::path::Path::new(&local_app_data)
-        .join("Synapse Z")
-        .join("autoexec");
-
-    if !autoexec_dir.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut scripts = vec![];
-    let read_dir = std::fs::read_dir(&autoexec_dir)
-        .map_err(|e| format!("Failed to read autoexec directory: {}", e))?;
-
-    for entry in read_dir {
-        if let Ok(entry) = entry {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".lua") || name.ends_with(".luau") {
-                    scripts.push(name.to_string());
-                }
-            }
-        }
-    }
-
-    Ok(scripts)
-}
-
-#[tauri::command]
-fn load_favorites() -> Result<Vec<String>, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let pearl_dir = std::path::Path::new(&local_app_data).join("Synapse Z");
-    if !pearl_dir.exists() {
-        std::fs::create_dir_all(&pearl_dir)
-            .map_err(|e| format!("Failed to create Synapse Z directory: {}", e))?;
-    }
-
-    let favorites_path = pearl_dir.join("favorites.json");
-
-    if !favorites_path.exists() {
-        return Ok(vec![]);
-    }
-
-    let content = std::fs::read_to_string(&favorites_path)
-        .map_err(|e| format!("Failed to read favorites: {}", e))?;
-
-    let favorites: Vec<String> = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse favorites: {}", e))?;
-
-    Ok(favorites)
-}
-
-#[tauri::command]
-fn save_favorites(favorites: Vec<String>) -> Result<bool, String> {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "Failed to get LOCALAPPDATA")?;
-
-    let pearl_dir = std::path::Path::new(&local_app_data).join("Synapse Z");
-    if !pearl_dir.exists() {
-        std::fs::create_dir_all(&pearl_dir)
-            .map_err(|e| format!("Failed to create Synapse Z directory: {}", e))?;
-    }
-
-    let favorites_path = pearl_dir.join("favorites.json");
-
-    let content = serde_json::to_string(&favorites)
-        .map_err(|e| format!("Failed to serialize favorites: {}", e))?;
-
-    std::fs::write(&favorites_path, content)
-        .map_err(|e| format!("Failed to write favorites: {}", e))?;
-
-    Ok(true)
-}
-
-#[tauri::command]
-fn reveal_in_explorer(path: String) -> Result<bool, String> {
-    let path = std::path::Path::new(&path);
-
-    if path.exists() {
-        Command::new("explorer")
-            .args(["/select,", &path.to_string_lossy()])
-            .spawn()
-            .map_err(|e| format!("Failed to reveal in explorer: {}", e))?;
-    } else if let Some(parent) = path.parent() {
-        if parent.exists() {
-            Command::new("explorer")
-                .arg(parent)
-                .spawn()
-                .map_err(|e| format!("Failed to open folder: {}", e))?;
-        }
-    }
-
-    Ok(true)
-}
-
-async fn install_vsix(vsix_path: &std::path::Path) -> Result<bool, String> {
-    let output = Command::new("code")
-        .args(["--install-extension", &vsix_path.to_string_lossy()])
-        .creation_flags(0x08000000)
-        .output();
-
-    match output {
-        Ok(result) => {
-            if result.status.success() {
-                Ok(true)
-            } else {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                if stderr.contains("not recognized") || stderr.contains("not found") {
-                    Err("VS Code CLI not found. Please install VS Code first.".to_string())
-                } else {
-                    Err(format!("Installation failed: {}", stderr))
-                }
-            }
+async fn read_file(ah: tauri::AppHandle, path: String) -> Result<(), ()> {
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let _ = ah.emit("file_content", FileContent { path, content });
         }
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Err("VS Code is not installed or not in PATH. Please install VS Code first.".to_string())
-            } else {
-                Err(format!("Failed to run VS Code CLI: {}", e))
-            }
+            let _ = ah.emit(
+                "output",
+                OutputEvent {
+                    pid: 0,
+                    status: 2,
+                    msg: format!("Read error: {}", e),
+                },
+            );
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
-async fn start_dma_server(state: State<'_, DmaState>) -> Result<bool, String> {
-    state.bridge.start().await?;
-    Ok(true)
+async fn save_settings_cmd(json: String) -> Result<(), ()> {
+    let p = settings_path();
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+    let _ = std::fs::write(&p, json);
+    Ok(())
 }
 
 #[tauri::command]
-async fn stop_dma_server(state: State<'_, DmaState>) -> Result<bool, String> {
-    state.bridge.stop().await;
-    Ok(true)
+async fn load_settings_cmd() -> Result<String, ()> {
+    Ok(std::fs::read_to_string(settings_path()).unwrap_or_else(|_| "{}".into()))
 }
 
 #[tauri::command]
-async fn is_dma_connected(state: State<'_, DmaState>) -> Result<bool, String> {
-    Ok(state.bridge.is_connected().await)
+async fn set_auto_inject(state: tauri::State<'_, Arc<AppState>>, enabled: bool) -> Result<(), ()> {
+    state
+        .auto_inject
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]
-async fn send_dma_script(state: State<'_, DmaState>, script: String) -> Result<bool, String> {
-    state.bridge.send_script(script).await?;
-    Ok(true)
+async fn open_scripts_folder() -> Result<(), ()> {
+    let dir = scripts_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    Ok(())
 }
 
 #[tauri::command]
-async fn launch_dma_exe(state: State<'_, DmaState>, exe_path: String, auto_close_seconds: u32) -> Result<bool, String> {
-    state.bridge.launch_hidden_exe(exe_path, auto_close_seconds).await?;
-    Ok(true)
+async fn launch_roblox() -> Result<(), ()> {
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", "roblox-player://"])
+        .spawn();
+    Ok(())
 }
 
 #[tauri::command]
-fn get_dma_port() -> u16 {
-    21575
-}
-
-#[tauri::command]
-async fn get_roblox_auth_ticket(cookie: String) -> Result<String, String> {
-    let client = reqwest::Client::new();
-
-    let csrf_response = client
-        .post("https://auth.roblox.com/v1/authentication-ticket")
-        .header("Cookie", format!(".ROBLOSECURITY={}", cookie))
-        .header("Content-Type", "application/json")
-        .header("Referer", "https://www.roblox.com")
-        .send()
-        .await
-        .map_err(|e| format!("CSRF request failed: {}", e))?;
-
-    let csrf_token = csrf_response
-        .headers()
-        .get("x-csrf-token")
-        .ok_or("No CSRF token returned")?
-        .to_str()
-        .map_err(|_| "Invalid CSRF token")?
-        .to_string();
-
-    let ticket_response = client
-        .post("https://auth.roblox.com/v1/authentication-ticket")
-        .header("Cookie", format!(".ROBLOSECURITY={}", cookie))
-        .header("Content-Type", "application/json")
-        .header("x-csrf-token", &csrf_token)
-        .header("Referer", "https://www.roblox.com")
-        .send()
-        .await
-        .map_err(|e| format!("Auth ticket request failed: {}", e))?;
-
-    if !ticket_response.status().is_success() {
-        return Err(format!("Auth ticket failed: HTTP {}", ticket_response.status()));
+async fn minimize_window(ah: tauri::AppHandle) -> Result<(), ()> {
+    if let Some(w) = ah.get_webview_window("main") {
+        let _ = w.minimize();
     }
-
-    let ticket = ticket_response
-        .headers()
-        .get("rbx-authentication-ticket")
-        .ok_or("No auth ticket in response")?
-        .to_str()
-        .map_err(|_| "Invalid auth ticket")?
-        .to_string();
-
-    Ok(ticket)
+    Ok(())
 }
 
 #[tauri::command]
-fn open_roblox_url(url: String) -> Result<bool, String> {
-    Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .creation_flags(0x08000000)
-        .spawn()
-        .map_err(|e| format!("Failed to open URL: {}", e))?;
-    Ok(true)
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RobloxUserInfo {
-    id: u64,
-    name: String,
-    display_name: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RobloxUsernameLookupRequest {
-    usernames: Vec<String>,
-    exclude_banned_users: bool,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RobloxUsernameLookupEntry {
-    id: u64,
-    name: String,
-    display_name: String,
-}
-
-#[derive(serde::Deserialize)]
-struct RobloxUsernameLookupResponse {
-    data: Vec<RobloxUsernameLookupEntry>,
-}
-
-#[tauri::command]
-async fn fetch_roblox_user_from_cookie(cookie: String) -> Result<RobloxUserInfo, String> {
-    let client = reqwest::Client::new();
-    let response = client
-        .get("https://users.roblox.com/v1/users/authenticated")
-        .header("Cookie", format!(".ROBLOSECURITY={}", cookie))
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Invalid cookie (HTTP {})", response.status()));
-    }
-
-    let info: serde_json::Value = response.json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    Ok(RobloxUserInfo {
-        id: info["id"].as_u64().unwrap_or(0),
-        name: info["name"].as_str().unwrap_or("").to_string(),
-        display_name: info["displayName"].as_str().unwrap_or("").to_string(),
-    })
-}
-
-#[tauri::command]
-async fn fetch_roblox_user_by_username(username: String) -> Result<RobloxUserInfo, String> {
-    let trimmed = username.trim();
-    if trimmed.is_empty() {
-        return Err("Username is required".to_string());
-    }
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://users.roblox.com/v1/usernames/users")
-        .json(&RobloxUsernameLookupRequest {
-            usernames: vec![trimmed.to_string()],
-            exclude_banned_users: false,
-        })
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("Username lookup failed (HTTP {})", response.status()));
-    }
-
-    let body: RobloxUsernameLookupResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    let user = body
-        .data
-        .into_iter()
-        .next()
-        .ok_or("User not found")?;
-
-    Ok(RobloxUserInfo {
-        id: user.id,
-        name: user.name,
-        display_name: user.display_name,
-    })
-}
-
-#[tauri::command]
-async fn fetch_roblox_avatar(user_id: u64) -> Result<String, String> {
-    let url = format!(
-        "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={}&size=150x150&format=Png&isCircular=false",
-        user_id
-    );
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Ok(String::new());
-    }
-
-    let json: serde_json::Value = response.json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    Ok(json["data"][0]["imageUrl"].as_str().unwrap_or("").to_string())
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RobloxGameInfo {
-    universe_id: u64,
-    name: String,
-    thumbnail_url: String,
-}
-
-#[tauri::command]
-async fn fetch_roblox_game_details(place_id: u64) -> Result<RobloxGameInfo, String> {
-    let uni_url = format!("https://apis.roblox.com/universes/v1/places/{}/universe", place_id);
-    let uni_response = reqwest::get(&uni_url)
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !uni_response.status().is_success() {
-        return Err("Invalid place ID".to_string());
-    }
-
-    let uni_json: serde_json::Value = uni_response.json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    let universe_id = uni_json["universeId"].as_u64()
-        .ok_or("Could not get universe ID")?;
-
-    let game_url = format!("https://games.roblox.com/v1/games?universeIds={}", universe_id);
-    let game_response = reqwest::get(&game_url)
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    let game_json: serde_json::Value = game_response.json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    let name = game_json["data"][0]["name"].as_str()
-        .unwrap_or("Unknown Game")
-        .to_string();
-
-    let thumb_url = format!(
-        "https://thumbnails.roblox.com/v1/games/icons?universeIds={}&returnPolicy=PlaceHolder&size=150x150&format=Png&isCircular=false",
-        universe_id
-    );
-    let thumb_response = reqwest::get(&thumb_url).await;
-    let thumbnail_url = match thumb_response {
-        Ok(resp) if resp.status().is_success() => {
-            let tj: serde_json::Value = resp.json().await.unwrap_or_default();
-            tj["data"][0]["imageUrl"].as_str().unwrap_or("").to_string()
+async fn maximize_window(ah: tauri::AppHandle) -> Result<(), ()> {
+    if let Some(w) = ah.get_webview_window("main") {
+        let maximized = w.is_maximized().unwrap_or(false);
+        if maximized {
+            let _ = w.unmaximize();
+        } else {
+            let _ = w.maximize();
         }
-        _ => String::new(),
-    };
+    }
+    Ok(())
+}
 
-    Ok(RobloxGameInfo {
-        universe_id,
-        name,
-        thumbnail_url,
-    })
+#[tauri::command]
+async fn close_window(ah: tauri::AppHandle) -> Result<(), ()> {
+    ah.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+async fn drag_window(ah: tauri::AppHandle) -> Result<(), ()> {
+    if let Some(w) = ah.get_webview_window("main") {
+        let _ = w.start_dragging();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_always_on_top(ah: tauri::AppHandle, enabled: bool) -> Result<(), ()> {
+    if let Some(w) = ah.get_webview_window("main") {
+        let _ = w.set_always_on_top(enabled);
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = Arc::new(AppState::new());
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .manage(LspState {
-            process: Mutex::new(None),
-        })
-        .manage(VsCodeState {
-            bridge: VsCodeBridge::new(),
-        })
-        .manage(ExplorerState {
-            bridge: ExplorerBridge::new(),
-        })
-        .manage(DmaState {
-            bridge: DmaBridge::new(),
-        })
+        .manage(state.clone())
         .manage(ConsoleState {
             bridge: ConsoleBridge::new(),
         })
-        .setup(|app| {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(window) = app.get_webview_window("main") {
-                    disable_webview_shortcuts(&window);
+        .setup(move |app| {
+            extract_resources_setup(app);
+            let sd = scripts_dir();
+            let _ = std::fs::create_dir_all(&sd);
+            let ah = app.handle().clone();
+            let st = state.clone();
+            tauri::async_runtime::spawn(run_ws_server(ah.clone(), st.clone()));
+            tauri::async_runtime::spawn(run_auto_inject_loop(ah.clone(), st.clone()));
+            let ah2 = ah.clone();
+            let st2 = st.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(3));
+                loop {
+                    interval.tick().await;
+                    emit_clients(&ah2, &st2).await;
                 }
-                let app_handle = app.handle().clone();
-                app.listen("tauri://webview-created", move |_event| {
-                    for (_, window) in app_handle.webview_windows() {
-                        disable_webview_shortcuts(&window);
+            });
+            start_file_watcher(ah.clone());
+            let ah3 = ah.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let _ = ah3.emit("scripts", &build_script_list());
+                let settings =
+                    std::fs::read_to_string(settings_path()).unwrap_or_else(|_| "{}".into());
+                let _ = ah3.emit("load_settings", settings);
+                let creds_info = match read_saved_credentials() {
+                    Some((user, _)) => {
+                        serde_json::json!({ "username": user, "hasCredentials": true })
                     }
-                });
-            }
+                    None => serde_json::json!({ "username": "", "hasCredentials": false }),
+                };
+                let _ = ah3.emit("credentials_status", creds_info);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            start_lsp,
-            stop_lsp,
-            send_lsp_message,
-            lsp_available,
+            load_client_settings_syn,
+            save_client_settings_syn,
             execute_script,
             execute_script_redirected,
             get_console_port,
-            load_client_settings_syn,
-            save_client_settings_syn,
-            redeem_license,
-            validate_license_session,
-            handle_attach,
-            is_roblox_running,
-            get_roblox_processes,
-            reset_hwid,
-            get_account_info,
-            logout_account,
-            toggle_protection,
-            start_vscode_server,
-            stop_vscode_server,
-            is_vscode_server_running,
-            get_app_version,
-            install_vscode_extension,
-            start_explorer_server,
-            stop_explorer_server,
-            is_explorer_connected,
-            get_explorer_connection_info,
-            send_explorer_message,
-            get_explorer_port,
-            get_explorer_script,
-            save_decompiled_script,
-            save_all_scripts,
-            open_folder_in_explorer,
-            get_workspace_path,
-            get_scripts_path,
-            create_scripts_folder,
-            move_scripts_entry,
-            get_app_storage_path,
-            reveal_in_explorer,
-            read_workspace_dir,
-            read_workspace_file,
-            get_autoexec_path,
-            add_to_autoexec,
-            remove_from_autoexec,
-            is_in_autoexec,
-            get_autoexec_scripts,
-            load_favorites,
-            save_favorites,
-            start_dma_server,
-            stop_dma_server,
-            is_dma_connected,
-            send_dma_script,
-            launch_dma_exe,
-            get_dma_port,
-            fetch_roblox_user_from_cookie,
-            fetch_roblox_user_by_username,
-            fetch_roblox_avatar,
-            fetch_roblox_game_details,
-            get_roblox_auth_ticket,
-            open_roblox_url
+            attach_roblox,
+            kill_client,
+            get_clients_list,
+            get_scripts_list,
+            read_file,
+            save_settings_cmd,
+            load_settings_cmd,
+            set_auto_inject,
+            open_scripts_folder,
+            launch_roblox,
+            minimize_window,
+            maximize_window,
+            close_window,
+            drag_window,
+            set_always_on_top,
+            set_credentials,
+            get_saved_credentials,
+            save_to_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
