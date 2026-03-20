@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getClientSettings } from './clientSettingsStore';
 
 export type AttachState = 'detached' | 'attaching' | 'attached';
 
@@ -129,5 +130,7 @@ export async function injectRoblox(): Promise<void> {
 
 export async function executeScript(script: string): Promise<void> {
   const pids = store.selectedPids.length > 0 ? store.selectedPids : [0];
-  await Promise.all(pids.map((pid) => invoke('execute_script', { pid, script })));
+  const clientSettings = getClientSettings();
+  const command = clientSettings.redirect_output ? 'execute_script_redirected' : 'execute_script';
+  await Promise.all(pids.map((pid) => invoke(command, { pid, script })));
 }

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod console_bridge;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +14,8 @@ use tauri::{Emitter, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
+
+use console_bridge::{ConsoleBridge, CONSOLE_PORT};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ScriptEntry {
@@ -44,6 +48,10 @@ struct OutputEvent {
 struct FileContent {
     path: String,
     content: String,
+}
+
+struct ConsoleState {
+    bridge: ConsoleBridge,
 }
 
 struct AppState {
@@ -88,6 +96,91 @@ fn settings_path() -> PathBuf {
 
 fn credentials_path() -> PathBuf {
     cosmic_dir().join("Credentials.dat")
+}
+
+fn get_synapse_settings_path() -> Result<PathBuf, String> {
+    let local_app_data = std::env::var("LOCALAPPDATA")
+        .map_err(|_| "Failed to get LOCALAPPDATA environment variable".to_string())?;
+    Ok(PathBuf::from(local_app_data)
+        .join("Synapse Z")
+        .join("bin")
+        .join("settings.syn"))
+}
+
+fn get_console_wrapper(script: &str) -> String {
+    let mut delimiter_level = 1;
+    let mut closing = "]".to_string();
+    while script.contains(&closing) {
+        delimiter_level += 1;
+        closing = format!("]{}]", "=".repeat(delimiter_level));
+    }
+
+    let equals = "=".repeat(delimiter_level);
+    let open = format!("[{}[", equals);
+    let close = format!("]{}]", equals);
+
+    format!(
+        r#"local __synz_console_port = {port}
+local __synz_http_service = game:GetService("HttpService")
+local __synz_console_socket = nil
+
+pcall(function()
+    __synz_console_socket = WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
+end)
+
+local function __synz_console_send(level, ...)
+    if not __synz_console_socket then
+        return
+    end
+
+    local packed = table.pack(...)
+    local parts = table.create(packed.n)
+
+    for index = 1, packed.n do
+        parts[index] = tostring(packed[index])
+    end
+
+    local payload = __synz_http_service:JSONEncode({{ level = level, message = table.concat(parts, "\t") }})
+    pcall(function()
+        __synz_console_socket:Send(payload)
+    end)
+end
+
+local __synz_original_print = print
+local __synz_original_warn = warn
+
+print = function(...)
+    __synz_console_send("info", ...)
+    return __synz_original_print(...)
+end
+
+warn = function(...)
+    __synz_console_send("warning", ...)
+    return __synz_original_warn(...)
+end
+
+local function __synz_console_run()
+    local __synz_fn, __synz_err = loadstring({open}{script}{close}, "synz-ui-console")
+    if not __synz_fn then
+        error(__synz_err, 0)
+    end
+    return __synz_fn()
+end
+
+local __synz_ok, __synz_err = xpcall(__synz_console_run, function(err)
+    local trace = debug.traceback(tostring(err), 2)
+    __synz_console_send("error", trace)
+    return trace
+end)
+
+if not __synz_ok then
+    error(__synz_err, 0)
+end"#,
+        port = CONSOLE_PORT,
+        open = open,
+        script = script,
+        close = close,
+    )
 }
 
 fn write_credentials(username: &str, password: &str) -> bool {
@@ -444,6 +537,67 @@ fn extract_resources_setup(_app: &tauri::App) {
 }
 
 #[tauri::command]
+fn load_client_settings_syn() -> Result<Value, String> {
+    let path = get_synapse_settings_path()?;
+
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read settings.syn: {}", e))?;
+
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse settings.syn: {}", e))
+}
+
+#[tauri::command]
+fn save_client_settings_syn(settings: Value) -> Result<bool, String> {
+    let path = get_synapse_settings_path()?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create settings folder: {}", e))?;
+    }
+
+    let serialized = serde_json::to_string(&settings)
+        .map_err(|e| format!("Failed to serialize settings.syn: {}", e))?;
+
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("Failed to write settings.syn: {}", e))?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+fn get_console_port() -> u16 {
+    CONSOLE_PORT
+}
+
+#[tauri::command]
+async fn execute_script_redirected(
+    app: tauri::AppHandle,
+    console_state: tauri::State<'_, ConsoleState>,
+    app_state: tauri::State<'_, Arc<AppState>>,
+    pid: i32,
+    script: String,
+) -> Result<(), String> {
+    if script.trim().is_empty() {
+        return Ok(());
+    }
+
+    console_state.bridge.start(app).await?;
+    let wrapped = get_console_wrapper(&script);
+
+    if pid > 0 {
+        send_to(&app_state, pid, &wrapped).await;
+    } else {
+        broadcast(&app_state, &wrapped).await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn set_credentials(
     state: tauri::State<'_, Arc<AppState>>,
     username: String,
@@ -690,6 +844,9 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(state.clone())
+        .manage(ConsoleState {
+            bridge: ConsoleBridge::new(),
+        })
         .setup(move |app| {
             extract_resources_setup(app);
             let sd = scripts_dir();
@@ -726,7 +883,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            load_client_settings_syn,
+            save_client_settings_syn,
             execute_script,
+            execute_script_redirected,
+            get_console_port,
             attach_roblox,
             kill_client,
             get_clients_list,
