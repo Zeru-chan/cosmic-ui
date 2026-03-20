@@ -21,7 +21,7 @@ import { FileViewer } from './FileViewer';
 import { fileStore, type VirtualFile } from '../../stores/fileStore';
 import { loadSettings, getSettings, subscribeToSettings, WorkbenchSettings, updateWorkbenchSetting } from '../../stores/settingsStore';
 import { saveSession, loadSession } from '../../stores/sessionStore';
-import { executeScript, injectRoblox } from '../../stores/attachStore';
+import { executeScript, injectRoblox, initializeAttachListeners } from '../../stores/attachStore';
 import { initializeConsoleListener } from '../../stores/consoleStore';
 import { loadClientSettings } from '../../stores/clientSettingsStore';
 import { transformScript, loadQolSettings } from '../../stores/qolStore';
@@ -267,6 +267,7 @@ export function Dashboard() {
     loadQolSettings();
     loadClientManager();
     initializeConsoleListener();
+    initializeAttachListeners();
     loadClientSettings();
 
     loadSettings().then(async () => {

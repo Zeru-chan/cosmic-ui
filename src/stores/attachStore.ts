@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getClientSettings } from './clientSettingsStore';
+import { appendConsoleLog } from './consoleStore';
 
 export type AttachState = 'detached' | 'attaching' | 'attached';
 
@@ -24,6 +26,7 @@ let store: AttachStore = {
 };
 
 const listeners = new Set<() => void>();
+let attachEventsInitialized = false;
 
 function notify() {
   listeners.forEach((listener) => listener());
@@ -96,6 +99,58 @@ export function subscribeAttach(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+export async function initializeAttachListeners(): Promise<void> {
+  if (attachEventsInitialized) {
+    return;
+  }
+
+  attachEventsInitialized = true;
+  await Promise.all([
+    listen<{ pid: number; status: number; msg: string }>('output', (event) => {
+      const level = event.payload.status === 2 ? 'error' : 'status';
+      appendConsoleLog({
+        level,
+        message: event.payload.msg,
+      });
+    }),
+    listen<{ pid: number; ok: boolean; msg: string; label: string }>('attach_result', (event) => {
+      appendConsoleLog({
+        level: event.payload.ok ? 'success' : 'error',
+        message: `${event.payload.label}: ${event.payload.msg}`,
+      });
+      void refreshProcesses();
+    }),
+    listen('inject_start', () => {
+      appendConsoleLog({
+        level: 'status',
+        message: 'Inject started...',
+      });
+    }),
+    listen('inject_end', () => {
+      appendConsoleLog({
+        level: 'status',
+        message: 'Inject finished.',
+      });
+      void refreshProcesses();
+    }),
+    listen('need_credentials', () => {
+      appendConsoleLog({
+        level: 'error',
+        message: 'Credentials are required before injecting.',
+      });
+    }),
+    listen('client_connected', () => {
+      void refreshProcesses();
+    }),
+    listen('client_disconnected', () => {
+      void refreshProcesses();
+    }),
+    listen('clients', () => {
+      void refreshProcesses();
+    }),
+  ]);
+}
+
 export function startAttaching(): void {
   store = { ...store, state: 'attaching' };
   notify();
@@ -117,8 +172,9 @@ export async function performAttach(invokeFunc: () => Promise<void>): Promise<vo
     await invokeFunc();
     await setAttached();
     await refreshProcesses();
-  } catch {
+  } catch (error) {
     await setDetached();
+    throw error;
   }
 }
 
