@@ -82,12 +82,29 @@ fn cosmic_dir() -> PathBuf {
 }
 
 fn scripts_dir() -> PathBuf {
-    std::env::current_exe()
-        .unwrap_or_default()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("workspace")
+    cosmic_dir().join("workspace")
+}
+
+fn sync_resource_file(source: &PathBuf, destination: &PathBuf) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {}", parent.display(), error))?;
+    }
+
+    std::fs::copy(source, destination).map_err(|error| {
+        format!(
+            "Failed to copy {} to {}: {}",
+            source.display(),
+            destination.display(),
+            error
+        )
+    })?;
+
+    Ok(())
 }
 
 fn settings_path() -> PathBuf {
@@ -237,12 +254,41 @@ fn get_process_uptime_secs(pid: u32) -> u64 {
     u64::MAX
 }
 
-fn ensure_resources_extracted(_app_handle: &tauri::AppHandle) {
-    let _ = std::fs::create_dir_all(cosmic_dir());
+fn ensure_resources_extracted(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let dir = cosmic_dir();
+    std::fs::create_dir_all(dir.join("workspace"))
+        .map_err(|error| format!("Failed to create Cosmic workspace: {}", error))?;
+
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        candidates.push(resource_dir);
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+
+    for candidate in candidates {
+        sync_resource_file(
+            &candidate.join("Cosmic-Injector.exe"),
+            &dir.join("Cosmic-Injector.exe"),
+        )?;
+        sync_resource_file(
+            &candidate.join("Cosmic-Module.dll"),
+            &dir.join("Cosmic-Module.dll"),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn run_injector(app_handle: &tauri::AppHandle, pid: u32) -> i32 {
-    ensure_resources_extracted(app_handle);
+    if ensure_resources_extracted(app_handle).is_err() {
+        return -1;
+    }
     let dir = cosmic_dir();
     let exe = dir.join("Cosmic-Injector.exe");
     if !exe.exists() {
@@ -532,8 +578,10 @@ async fn run_auto_inject_loop(ah: tauri::AppHandle, state: Arc<AppState>) {
 
 fn start_file_watcher(_ah: tauri::AppHandle) {}
 
-fn extract_resources_setup(_app: &tauri::App) {
-    let _ = std::fs::create_dir_all(cosmic_dir());
+fn extract_resources_setup(app: &tauri::App) {
+    if let Err(error) = ensure_resources_extracted(&app.handle().clone()) {
+        eprintln!("Failed to initialize Cosmic resources: {error}");
+    }
 }
 
 #[tauri::command]
