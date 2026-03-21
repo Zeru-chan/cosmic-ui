@@ -50,6 +50,14 @@ struct FileContent {
     content: String,
 }
 
+#[derive(Serialize)]
+struct WorkspaceEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    extension: Option<String>,
+}
+
 struct ConsoleState {
     bridge: ConsoleBridge,
 }
@@ -82,7 +90,41 @@ fn cosmic_dir() -> PathBuf {
 }
 
 fn scripts_dir() -> PathBuf {
+    cosmic_dir().join("Scripts")
+}
+
+fn workspace_dir() -> PathBuf {
     cosmic_dir().join("Workspace")
+}
+
+fn autoexec_dir() -> PathBuf {
+    cosmic_dir().join("autoexec")
+}
+
+fn sanitize_relative_path(path: &str) -> Result<PathBuf, String> {
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+
+    let normalized = raw.replace('/', "\\");
+    let relative = PathBuf::from(normalized);
+    if relative.is_absolute() {
+        return Err("Absolute paths are not allowed".to_string());
+    }
+
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("Path traversal is not allowed".to_string());
+    }
+
+    Ok(relative)
+}
+
+fn resolve_scripts_relative_path(path: &str) -> Result<PathBuf, String> {
+    Ok(scripts_dir().join(sanitize_relative_path(path)?))
 }
 
 fn sync_resource_file(source: &PathBuf, destination: &PathBuf) -> Result<(), String> {
@@ -315,6 +357,8 @@ fn ensure_resources_extracted(app_handle: &tauri::AppHandle) -> Result<(), Strin
     let dir = cosmic_dir();
     std::fs::create_dir_all(scripts_dir())
         .map_err(|error| format!("Failed to create Cosmic workspace: {}", error))?;
+    std::fs::create_dir_all(workspace_dir())
+        .map_err(|error| format!("Failed to create Workspace folder: {}", error))?;
 
     let mut candidates = Vec::new();
 
@@ -889,6 +933,130 @@ async fn open_scripts_folder() -> Result<(), ()> {
 }
 
 #[tauri::command]
+async fn get_scripts_path() -> Result<String, String> {
+    let dir = scripts_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_workspace_path() -> Result<String, String> {
+    let dir = workspace_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn read_workspace_dir(dir_path: String) -> Result<Vec<WorkspaceEntry>, String> {
+    let dir = PathBuf::from(dir_path);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+
+    let mut entries: Vec<WorkspaceEntry> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            WorkspaceEntry {
+                name: entry.file_name().to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                is_dir,
+                extension: if is_dir {
+                    None
+                } else {
+                    path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_string())
+                },
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn read_workspace_file(file_path: String) -> Result<String, String> {
+    std::fs::read_to_string(file_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_scripts_folder(relative_path: String) -> Result<(), String> {
+    let path = resolve_scripts_relative_path(&relative_path)?;
+    std::fs::create_dir_all(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn move_scripts_entry(
+    from_relative_path: String,
+    to_relative_path: String,
+) -> Result<(), String> {
+    let from = resolve_scripts_relative_path(&from_relative_path)?;
+    let to = resolve_scripts_relative_path(&to_relative_path)?;
+
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::rename(from, to).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reveal_in_explorer(path: String) -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .args(["/select,", &path])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_autoexec_scripts() -> Result<Vec<String>, String> {
+    let dir = autoexec_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_file() {
+            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                entries.push(name.to_string());
+            }
+        }
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn add_to_autoexec(script_name: String, content: String) -> Result<(), String> {
+    let safe = sanitize_relative_path(&script_name)?;
+    let file_name = format!("{}.lua", safe.to_string_lossy().replace('\\', "__"));
+    let path = autoexec_dir().join(file_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_from_autoexec(script_name: String) -> Result<(), String> {
+    let safe = sanitize_relative_path(&script_name)?;
+    let file_name = format!("{}.lua", safe.to_string_lossy().replace('\\', "__"));
+    let path = autoexec_dir().join(file_name);
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn launch_roblox() -> Result<(), ()> {
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "", "roblox-player://"])
@@ -993,6 +1161,10 @@ pub fn run() {
             execute_script,
             execute_script_redirected,
             get_console_port,
+            get_scripts_path,
+            get_workspace_path,
+            read_workspace_dir,
+            read_workspace_file,
             attach_roblox,
             kill_client,
             get_clients_list,
@@ -1011,6 +1183,12 @@ pub fn run() {
             set_credentials,
             get_saved_credentials,
             save_to_workspace,
+            create_scripts_folder,
+            move_scripts_entry,
+            reveal_in_explorer,
+            get_autoexec_scripts,
+            add_to_autoexec,
+            remove_from_autoexec,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
