@@ -82,7 +82,7 @@ fn cosmic_dir() -> PathBuf {
 }
 
 fn scripts_dir() -> PathBuf {
-    cosmic_dir().join("workspace")
+    cosmic_dir().join("Workspace")
 }
 
 fn sync_resource_file(source: &PathBuf, destination: &PathBuf) -> Result<(), String> {
@@ -140,22 +140,66 @@ fn get_console_wrapper(script: &str) -> String {
         r#"local __synz_console_port = {port}
 local __synz_http_service = game:GetService("HttpService")
 local __synz_console_socket = nil
+local __synz_console_connecting = false
+local __synz_console_reconnect_task = nil
 local __synz_original_print = print
 local __synz_original_warn = warn
 
-while not __synz_console_socket do
-    pcall(function()
-        __synz_console_socket = WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
+local function __synz_console_connect()
+    if __synz_console_socket or __synz_console_connecting then
+        return __synz_console_socket ~= nil
+    end
+
+    __synz_console_connecting = true
+    __synz_original_print("Trying to connect errors bridge...")
+    local ok, socket = pcall(function()
+        return WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
     end)
 
-    if not __synz_console_socket then
-        task.wait(0.25)
+    if ok and socket then
+        __synz_console_socket = socket
+        __synz_original_print("Connected errors bridge")
+
+        local closeSignal = socket.OnClose or socket.onclose
+        if closeSignal and closeSignal.Connect then
+            pcall(function()
+                closeSignal:Connect(function()
+                    __synz_console_socket = nil
+                    __synz_original_warn("Errors bridge disconnected, reconnecting...")
+                end)
+            end)
+        end
     end
+
+    __synz_console_connecting = false
+    return __synz_console_socket ~= nil
 end
 
-__synz_original_print("Connected errors bridge")
+local function __synz_console_ensure_reconnect_loop()
+    if __synz_console_socket then
+        return
+    end
+    if __synz_console_reconnect_task and coroutine.status(__synz_console_reconnect_task) ~= "dead" then
+        return
+    end
+
+    __synz_console_reconnect_task = task.spawn(function()
+        while not __synz_console_socket do
+            __synz_console_connect()
+            if not __synz_console_socket then
+                task.wait(0.25)
+            end
+        end
+    end)
+end
+
+__synz_console_ensure_reconnect_loop()
 
 local function __synz_console_send(level, ...)
+    if not __synz_console_socket then
+        __synz_console_ensure_reconnect_loop()
+    end
+
     if not __synz_console_socket then
         return
     end
@@ -168,9 +212,15 @@ local function __synz_console_send(level, ...)
     end
 
     local payload = __synz_http_service:JSONEncode({{ level = level, message = table.concat(parts, "\t") }})
-    pcall(function()
+    local sent = pcall(function()
         __synz_console_socket:Send(payload)
     end)
+
+    if not sent then
+        __synz_console_socket = nil
+        __synz_original_warn("Errors bridge send failed, reconnecting...")
+        __synz_console_ensure_reconnect_loop()
+    end
 end
 
 print = function(...)
@@ -263,7 +313,7 @@ fn get_process_uptime_secs(pid: u32) -> u64 {
 
 fn ensure_resources_extracted(app_handle: &tauri::AppHandle) -> Result<(), String> {
     let dir = cosmic_dir();
-    std::fs::create_dir_all(dir.join("workspace"))
+    std::fs::create_dir_all(scripts_dir())
         .map_err(|error| format!("Failed to create Cosmic workspace: {}", error))?;
 
     let mut candidates = Vec::new();
