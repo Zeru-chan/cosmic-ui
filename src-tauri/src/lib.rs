@@ -140,22 +140,54 @@ fn get_console_wrapper(script: &str) -> String {
         r#"local __synz_console_port = {port}
 local __synz_http_service = game:GetService("HttpService")
 local __synz_console_socket = nil
+local __synz_console_connecting = false
 local __synz_original_print = print
 local __synz_original_warn = warn
 
-while not __synz_console_socket do
-    pcall(function()
-        __synz_console_socket = WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
-    end)
-
-    if not __synz_console_socket then
-        task.wait(0.25)
+local function __synz_console_connect()
+    if __synz_console_connecting then
+        while __synz_console_connecting and not __synz_console_socket do
+            task.wait(0.1)
+        end
+        return __synz_console_socket ~= nil
     end
+
+    __synz_console_connecting = true
+    __synz_original_print("Trying to connect errors bridge...")
+    while not __synz_console_socket do
+        local ok, socket = pcall(function()
+            return WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
+        end)
+
+        if ok and socket then
+            __synz_console_socket = socket
+            __synz_original_print("Connected errors bridge")
+
+            local closeSignal = socket.OnClose or socket.onclose
+            if closeSignal and closeSignal.Connect then
+                pcall(function()
+                    closeSignal:Connect(function()
+                        __synz_console_socket = nil
+                        __synz_original_warn("Errors bridge disconnected, reconnecting...")
+                    end)
+                end)
+            end
+        else
+            task.wait(0.25)
+        end
+    end
+
+    __synz_console_connecting = false
+    return true
 end
 
-__synz_original_print("Connected errors bridge")
+__synz_console_connect()
 
 local function __synz_console_send(level, ...)
+    if not __synz_console_socket then
+        __synz_console_connect()
+    end
+
     if not __synz_console_socket then
         return
     end
@@ -168,9 +200,15 @@ local function __synz_console_send(level, ...)
     end
 
     local payload = __synz_http_service:JSONEncode({{ level = level, message = table.concat(parts, "\t") }})
-    pcall(function()
+    local sent = pcall(function()
         __synz_console_socket:Send(payload)
     end)
+
+    if not sent then
+        __synz_console_socket = nil
+        __synz_original_warn("Errors bridge send failed, reconnecting...")
+        __synz_console_connect()
+    end
 end
 
 print = function(...)
