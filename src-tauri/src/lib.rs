@@ -119,7 +119,7 @@ fn get_synapse_settings_path() -> Result<PathBuf, String> {
     let local_app_data = std::env::var("LOCALAPPDATA")
         .map_err(|_| "Failed to get LOCALAPPDATA environment variable".to_string())?;
     Ok(PathBuf::from(local_app_data)
-        .join("Synapse Z")
+        .join("SynapseZ")
         .join("bin")
         .join("settings.syn"))
 }
