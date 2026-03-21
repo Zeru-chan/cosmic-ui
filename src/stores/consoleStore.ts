@@ -73,6 +73,7 @@ export function getConsoleLogs(): ConsoleLogEntry[] {
 }
 
 export function subscribeToConsoleLogs(callback: () => void): () => void {
+  void initializeConsoleListener();
   listeners.add(callback);
   return () => listeners.delete(callback);
 }
