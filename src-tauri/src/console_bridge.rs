@@ -4,10 +4,10 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::accept_async;
 
-pub const CONSOLE_PORT: u16 = 21576;
+pub const CONSOLE_PORT: u16 = 32578;
 
 #[derive(Deserialize)]
 struct ConsoleMessage {
@@ -17,47 +17,46 @@ struct ConsoleMessage {
 
 pub struct ConsoleBridge {
     running: Arc<RwLock<bool>>,
+    startup_lock: Arc<Mutex<()>>,
 }
 
 impl ConsoleBridge {
     pub fn new() -> Self {
         Self {
             running: Arc::new(RwLock::new(false)),
+            startup_lock: Arc::new(Mutex::new(())),
         }
     }
 
-    pub async fn start(&self, app: AppHandle) -> Result<(), String> {
+    pub async fn start(&self, app: AppHandle) -> Result<u16, String> {
         if *self.running.read().await {
-            return Ok(());
+            return Ok(CONSOLE_PORT);
         }
+
+        let _guard = self.startup_lock.lock().await;
+
+        if *self.running.read().await {
+            return Ok(CONSOLE_PORT);
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", CONSOLE_PORT))
+            .await
+            .map_err(|err| format!("Failed to bind console bridge: {}", err))?;
 
         *self.running.write().await = true;
 
         let running = self.running.clone();
 
         tokio::spawn(async move {
-            let addr = format!("127.0.0.1:{}", CONSOLE_PORT);
-            let listener = match TcpListener::bind(&addr).await {
-                Ok(listener) => listener,
-                Err(err) => {
-                    eprintln!("[Console] Failed to bind {}: {}", addr, err);
-                    *running.write().await = false;
-                    return;
-                }
-            };
-
             loop {
-                if !*running.read().await {
-                    break;
-                }
+                let accept_result = listener.accept().await;
 
-                let accept_result = tokio::select! {
-                    result = listener.accept() => Some(result),
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => None,
-                };
-
-                let Some(Ok((stream, _))) = accept_result else {
-                    continue;
+                let (stream, _) = match accept_result {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        eprintln!("[Console] Accept error: {}", err);
+                        break;
+                    }
                 };
 
                 let ws_stream = match accept_async(stream).await {
@@ -95,8 +94,18 @@ impl ConsoleBridge {
                     }
                 });
             }
+
+            *running.write().await = false;
         });
 
-        Ok(())
+        Ok(CONSOLE_PORT)
+    }
+
+    pub async fn port(&self) -> Option<u16> {
+        if *self.running.read().await {
+            Some(CONSOLE_PORT)
+        } else {
+            None
+        }
     }
 }
