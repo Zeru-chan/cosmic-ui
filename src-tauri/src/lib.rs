@@ -140,10 +140,20 @@ fn get_console_wrapper(script: &str) -> String {
         r#"local __synz_console_port = {port}
 local __synz_http_service = game:GetService("HttpService")
 local __synz_console_socket = nil
+local __synz_original_print = print
+local __synz_original_warn = warn
 
-pcall(function()
-    __synz_console_socket = WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
-end)
+while not __synz_console_socket do
+    pcall(function()
+        __synz_console_socket = WebSocket.connect("ws://127.0.0.1:" .. tostring(__synz_console_port))
+    end)
+
+    if not __synz_console_socket then
+        task.wait(0.25)
+    end
+end
+
+__synz_original_print("Connected errors bridge")
 
 local function __synz_console_send(level, ...)
     if not __synz_console_socket then
@@ -162,9 +172,6 @@ local function __synz_console_send(level, ...)
         __synz_console_socket:Send(payload)
     end)
 end
-
-local __synz_original_print = print
-local __synz_original_warn = warn
 
 print = function(...)
     __synz_console_send("info", ...)
